@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      # PySide6 needs a handful of X libraries even to run offscreen.
+      - name: Install Qt runtime dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-cursor0
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" httpx
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest tests/ -q --durations=10
+
+  reference-codec:
+    name: C reference codec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the host codec
+        run: python -m pip install -e .
+
+      - name: Build and self-test
+        working-directory: firmware-ref
+        run: make test
+
+      # The check that keeps the specification honest: the C the firmware will
+      # use and the Python the desktop uses must emit identical bytes.
+      - name: Cross-check against the Python codec
+        working-directory: firmware-ref
+        run: make crosscheck
+
+  package:
+    name: Package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build a Debian package
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y devscripts debhelper dh-python python3-all \
+                                  python3-setuptools python3-wheel
+          ./packaging/debian/build.sh
+
+      - name: Build the macOS app and dmg
+        if: runner.os == 'macOS'
+        run: ./packaging/macos/build.sh
+
+      - name: Build the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tjiptemp-${{ runner.os }}
+          path: |
+            build/*.deb
+            dist/*.dmg
+            dist/*Setup*.exe
+          if-no-files-found: warn

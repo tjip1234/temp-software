@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tjiptemp"
+version = "0.1.0"
+description = "Desktop control, logging and calibration software for the TjipTemp ESP32-S3 thermometer board"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "raaf" }]
+keywords = ["thermometer", "pt1000", "thermocouple", "esp32", "instrumentation", "datalogger"]
+classifiers = [
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+
+dependencies = [
+    "PySide6>=6.6",
+    "pyqtgraph>=0.13.3",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "seaborn>=0.13",
+    "openpyxl>=3.1",
+    "XlsxWriter>=3.1",
+    "pyserial>=3.5",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "websockets>=12.0",
+    "zeroconf>=0.131",
+    "platformdirs>=4.0",
+]
+
+[project.optional-dependencies]
+ble = ["bleak>=0.21"]
+dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff>=0.3", "pyinstaller>=6.4"]
+
+[project.scripts]
+tjiptemp = "tjiptemp.__main__:main"
+tjiptemp-sim = "tjiptemp.simulator.__main__:main"
+
+[project.gui-scripts]
+tjiptemp-gui = "tjiptemp.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tjiptemp = ["resources/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

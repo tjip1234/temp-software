@@ -1,0 +1,57 @@
+MIT License
+
+Copyright (c) 2026 raaf
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Note on dependencies, since the licence choice here was left open:
+
+Every dependency is permissively licensed, so this project can be MIT, or
+relicensed to anything else, without complication:
+
+    PySide6        LGPL-3.0     Qt for Python, dynamically linked
+    pyqtgraph      MIT
+    numpy/scipy    BSD-3-Clause
+    pandas         BSD-3-Clause
+    matplotlib     PSF-like (BSD-compatible)
+    seaborn        BSD-3-Clause
+    openpyxl       MIT
+    XlsxWriter     BSD-2-Clause
+    pyserial       BSD-3-Clause
+    fastapi        MIT
+    uvicorn        BSD-3-Clause
+    websockets     BSD-3-Clause
+    zeroconf       LGPL-2.1
+    platformdirs   MIT
+    qasync         BSD-2-Clause
+    bleak          MIT          (optional)
+
+Two of those are copyleft, and both only in the weak sense: PySide6 (LGPL-3.0)
+and zeroconf (LGPL-2.1) are used as separate, dynamically loaded libraries and
+are not modified, which is exactly the arrangement the LGPL permits for a
+proprietary or permissively licensed application. If you ever bundle them with
+PyInstaller and ship a closed-source build, the LGPL's relinking obligation is
+satisfied by offering the object files or, more simply, by noting that users can
+replace the bundled libraries — worth a lawyer's glance if it matters to you.
+
+Deliberately avoided: Qt Charts and QCustomPlot, both GPL-3.0-or-commercial,
+which would have forced this project to be GPL or paid for. pyqtgraph does the
+same job under MIT.

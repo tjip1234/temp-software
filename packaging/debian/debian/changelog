@@ -1,0 +1,12 @@
+tjiptemp (0.1.0-1) unstable; urgency=medium
+
+  * Initial release.
+    - TJIP-1 protocol over USB CDC, WiFi (TCP) and BLE.
+    - Live plotting, recording with fitted UTC timestamps, backfill over
+      redundant links.
+    - Calibration wizard for PT1000 (Callendar-Van Dusen), type-K (ITS-90) and
+      NTC (Steinhart-Hart / Beta), written to the board's NVS.
+    - CSV, Excel, Parquet, JSON and figure export.
+    - Local REST and WebSocket API with generated OpenAPI.
+
+ -- raaf <rafaeldiederen@gmail.com>  Wed, 05 Aug 2026 12:00:00 +0000

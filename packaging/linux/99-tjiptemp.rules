@@ -1,0 +1,24 @@
+# udev rules for the TjipTemp ESP32-S3 thermometer board.
+#
+# Install to /usr/lib/udev/rules.d/99-tjiptemp.rules (distro packages) or
+# /etc/udev/rules.d/99-tjiptemp.rules (manual), then:
+#
+#     sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# This grants access to the board specifically, which is better than adding
+# yourself to the dialout/uucp group: that would hand you every serial device on
+# the machine, including ones you have no business writing to.
+
+# ESP32-S3 native USB CDC
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", \
+  MODE="0660", TAG+="uaccess", SYMLINK+="tjiptemp-%s{serial}"
+
+# ESP32-S3 USB JTAG/serial debug unit
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4001", \
+  MODE="0660", TAG+="uaccess", SYMLINK+="tjiptemp-jtag-%s{serial}"
+
+# Any other Espressif CDC device
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", MODE="0660", TAG+="uaccess"
+
+# Raw USB access, needed only if a future firmware adds a vendor interface.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="303a", MODE="0660", TAG+="uaccess"

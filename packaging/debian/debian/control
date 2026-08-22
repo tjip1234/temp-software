@@ -1,0 +1,49 @@
+Source: tjiptemp
+Section: science
+Priority: optional
+Maintainer: raaf <rafaeldiederen@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-python,
+               python3-all,
+               python3-setuptools,
+               python3-wheel
+Standards-Version: 4.6.2
+Homepage: https://github.com/tjiptemp/tjiptemp
+Rules-Requires-Root: no
+
+Package: tjiptemp
+Architecture: all
+Depends: ${python3:Depends},
+         ${misc:Depends},
+         python3-pyside6.qtwidgets,
+         python3-pyside6.qtcharts | python3-pyqtgraph,
+         python3-pyqtgraph,
+         python3-numpy,
+         python3-scipy,
+         python3-pandas,
+         python3-matplotlib,
+         python3-seaborn,
+         python3-openpyxl,
+         python3-xlsxwriter,
+         python3-serial,
+         python3-fastapi,
+         python3-uvicorn,
+         python3-websockets,
+         python3-zeroconf,
+         python3-platformdirs,
+         python3-qasync
+Recommends: python3-bleak
+Suggests: python3-pyarrow
+Description: Desktop software for the TjipTemp ESP32-S3 thermometer board
+ Control, logging and calibration software for a multi-sensor thermometer board
+ carrying a PT1000 (2-, 3- or 4-wire via MAX31865), a type-K thermocouple
+ (MAX31856), six NTC thermistors, battery and supply monitoring, and an AHT20
+ humidity sensor.
+ .
+ Connects over USB CDC, WiFi or BLE, plots every channel live, records to a
+ local database with fitted UTC timestamps, exports to CSV, Excel, Parquet and
+ publication-quality figures, and exposes a documented REST and WebSocket API
+ for other programs.
+ .
+ The board has no controls of its own, so its 240x320 display, its sensor
+ configuration and its stored calibration are all driven from here.

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=TjipTemp
+GenericName=Thermometer
+Comment=Control, log and calibrate TjipTemp thermometer boards
+Exec=tjiptemp %U
+Icon=io.github.tjiptemp
+Terminal=false
+Categories=Science;Electronics;Engineering;DataVisualization;
+Keywords=thermometer;temperature;PT1000;thermocouple;NTC;datalogger;ESP32;calibration;
+StartupNotify=true
+StartupWMClass=tjiptemp

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.tjiptemp</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>TjipTemp</name>
+  <summary>Control, log and calibrate TjipTemp thermometer boards</summary>
+
+  <description>
+    <p>
+      Desktop software for the TjipTemp ESP32-S3 thermometer board: a PT1000 in
+      2-, 3- or 4-wire configuration, a type-K thermocouple, six NTC thermistors,
+      battery and supply monitoring, and an AHT20 humidity sensor.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Live plotting of every channel over USB, WiFi or Bluetooth LE</li>
+      <li>Recording with fitted UTC timestamps and gap backfill</li>
+      <li>Calibration wizard writing coefficients to the board's memory</li>
+      <li>Export to CSV, Excel, Parquet and publication-quality figures</li>
+      <li>Local REST and WebSocket API for other programs</li>
+      <li>Control of the board's 240x320 display, which has no buttons of its own</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.tjiptemp.desktop</launchable>
+  <url type="homepage">https://github.com/tjiptemp/tjiptemp</url>
+  <url type="bugtracker">https://github.com/tjiptemp/tjiptemp/issues</url>
+  <categories>
+    <category>Science</category>
+    <category>Electronics</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-05">
+      <description><p>Initial release.</p></description>
+    </release>
+  </releases>
+</component>

@@ -17,3 +17,7 @@ packaging/icon.png
 packaging/icon.ico
 packaging/icon.icns
 packaging/icon-*.png
+
+# Local assistant and editor state — machine-specific, not part of the project.
+.claude/
+CLAUDE.md

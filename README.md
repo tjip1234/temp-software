@@ -51,6 +51,12 @@ falling back to `python3`; set `PYTHON=/path/to/python` to override. The app
 icon is generated, not committed as a blob — `packaging/make_icons.py` draws it
 and writes the PNG, ICO and ICNS the three builds need.
 
+To actually cut a release, `scripts/release.sh 0.2.0` checks the tree, the
+version, the lint, the tests and the C/Python codec cross-check, then tags and
+pushes — and CI builds all three artifacts, since only a macOS runner can make a
+`.dmg`. `--dry-run` shows what it would do; `--local` builds just this
+platform's artifact without tagging anything.
+
 **AppImages and glibc.** glibc is not forward-compatible, so an AppImage built
 on a recent distribution will not start on an older one. Build on the oldest
 distribution you intend to support; the release workflow uses Ubuntu 22.04 for

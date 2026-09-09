@@ -36,6 +36,15 @@ def main() -> int:
     show("block", M.encode_sample_block(block))
 
     show("timeecho", M.encode_time_echo(0x1122334455667788, 111, 222))
+
+    # COBS changes behaviour at a run of 254 non-zero bytes, which is where an
+    # implementation on either side is most likely to diverge. Pin the three
+    # cases either side of it: a run that stops just short, one that lands
+    # exactly on the boundary, and one that carries a zero immediately after.
+    show("cobs253", encode_frame(Frame(M.Msg.LOG, b"\x41" * 253, seq=1)))
+    show("cobs254", encode_frame(Frame(M.Msg.LOG, b"\x41" * 254, seq=2)))
+    show("cobszero", encode_frame(
+        Frame(M.Msg.LOG, b"\x41" * 254 + b"\x00\x42", seq=3)))
     return 0
 
 

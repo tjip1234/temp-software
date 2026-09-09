@@ -1,11 +1,9 @@
-# PyInstaller spec — the macOS .app and the Windows .exe.
-#
-# Linux users get a distro package instead (AUR / DEB), which is smaller, uses
-# system Qt, and integrates with the desktop properly. Bundling is for the two
-# platforms without a package manager to lean on.
+# PyInstaller spec — one bundle, three shapes: the Linux AppImage payload, the
+# macOS .app inside the .dmg, and the Windows .exe.
 #
 #     pyinstaller packaging/tjiptemp.spec --noconfirm
 #
+# The platform build scripts call this; run it directly only to debug a bundle.
 # Expect roughly 150 MB before compression: Qt, numpy, scipy, pandas and
 # matplotlib are all large, and excluding their unused corners (below) claws
 # back a good fraction of it.
@@ -17,6 +15,47 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).parent
 IS_MAC = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+
+
+def icon_for_platform():
+    """The icon to embed in the executable, or None if there is none to embed.
+
+    Only Windows and macOS carry an icon inside the binary; on Linux the icon
+    belongs to the AppDir, which the AppImage script fills from the hicolor PNGs,
+    so passing one here only earns a warning.
+
+    ``packaging/make_icons.py`` writes all the formats and every build script
+    runs it first. Returning None rather than a path that might not exist
+    matters: PyInstaller aborts the entire build over an icon it cannot open,
+    and a missing icon is not a reason to have no application.
+    """
+    if IS_MAC:
+        name = "icon.icns"
+    elif IS_WINDOWS:
+        name = "icon.ico"
+    else:
+        return None
+    path = ROOT / "packaging" / name
+    return str(path) if path.exists() else None
+
+
+ICON = icon_for_platform()
+
+
+def project_version() -> str:
+    """Read the version from pyproject rather than restating it here.
+
+    Three copies of "0.1.0" in the Info.plist was three chances to ship a bundle
+    whose About box disagrees with the package it came from.
+    """
+    import tomllib
+
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    return str(data["project"]["version"])
+
+
+VERSION = project_version()
 
 hidden = [
     # Uvicorn and FastAPI resolve these by name at runtime, so static analysis
@@ -52,7 +91,10 @@ excludes = [
 ]
 
 a = Analysis(
-    [str(ROOT / "src" / "tjiptemp" / "__main__.py")],
+    # A launcher that imports the package, not the package's own __main__:
+    # PyInstaller runs the entry script as a top-level module, where the
+    # relative imports inside tjiptemp/__main__.py cannot resolve.
+    [str(ROOT / "packaging" / "entrypoint.py")],
     pathex=[str(ROOT / "src")],
     binaries=[],
     datas=datas,
@@ -80,8 +122,7 @@ exe = EXE(
     target_arch="universal2" if IS_MAC else None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ROOT / "packaging" / "icon.icns") if IS_MAC
-         else str(ROOT / "packaging" / "icon.ico"),
+    icon=ICON,
 )
 
 coll = COLLECT(
@@ -97,13 +138,13 @@ if IS_MAC:
     app = BUNDLE(
         coll,
         name="TjipTemp.app",
-        icon=str(ROOT / "packaging" / "icon.icns"),
+        icon=ICON,
         bundle_identifier="io.github.tjiptemp",
-        version="0.1.0",
+        version=VERSION,
         info_plist={
             "CFBundleName": "TjipTemp",
             "CFBundleDisplayName": "TjipTemp",
-            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleShortVersionString": VERSION,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
             # macOS 13+ prompts for this the first time a serial port is opened.

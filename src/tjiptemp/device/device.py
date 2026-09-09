@@ -109,6 +109,8 @@ class Device:
 
         self.channels: dict[int, ChannelSpec] = {}
         self.channel_order: tuple[int, ...] = ()
+        #: Column permutation per source channel set, see _reindex_plan.
+        self._reindex_cache: dict[tuple[int, ...], tuple[np.ndarray, np.ndarray]] = {}
 
         self.timebase = Timebase()
         self.aggregator = SampleAggregator()
@@ -299,6 +301,7 @@ class Device:
         self.info = info
         self.channels = specs_from_device_info(info)
         self.channel_order = tuple(sorted(self.channels))
+        self._reindex_cache.clear()   # the canonical order just changed
         if self.live.n_channels != len(self.channel_order):
             self.live = ChannelRing(len(self.channel_order), LIVE_CAPACITY)
         if not self.name:
@@ -443,17 +446,20 @@ class Device:
         if not ordered:
             return
 
+        # Convert device time to UTC once per block. The recorder wants the same
+        # timestamps the live buffer got, and fitting them twice was not only
+        # wasted work but a way for the two to disagree if the timebase fit were
+        # updated in between.
+        per_block_times = []
         for ready in ordered:
             times_s = self.timebase.to_utc_ns(ready.device_times_us().astype(np.float64)) / 1e9
-            values = self._reindex(ready)
-            self.live.append(times_s, values, ready.sequences())
+            per_block_times.append(times_s)
+            self.live.append(times_s, self._reindex(ready), ready.sequences())
 
         if self.on_blocks is not None:
             try:
-                merged_times = np.concatenate(
-                    [self.timebase.to_utc_ns(b.device_times_us().astype(np.float64)) / 1e9
-                     for b in ordered]
-                )
+                merged_times = (per_block_times[0] if len(per_block_times) == 1
+                                else np.concatenate(per_block_times))
                 self.on_blocks(ordered, merged_times)
             except Exception:
                 log.exception("recorder callback failed")
@@ -470,14 +476,42 @@ class Device:
         self._emit("samples", rows=block.n_samples, backfill=False, decimated=True)
 
     def _reindex(self, block: M.SampleBlock) -> np.ndarray:
-        """Map a block's columns onto this device's canonical channel order."""
+        """Map a block's columns onto this device's canonical channel order.
+
+        The mapping only changes when the board reports a different channel set,
+        which is once per connection — so it is worked out once and cached, and
+        the per-block cost is a single fancy-index. The loop this replaces did a
+        linear scan of the id tuple twice per output column, on every block.
+        """
         if block.channel_ids == self.channel_order:
             return block.data
-        out = np.full((block.n_samples, len(self.channel_order)), np.nan, dtype=np.float32)
-        for col, cid in enumerate(self.channel_order):
-            if cid in block.channel_ids:
-                out[:, col] = block.data[:, block.channel_ids.index(cid)]
+        take, missing = self._reindex_plan(block.channel_ids)
+        out = block.data[:, take]
+        if missing.size:
+            out[:, missing] = np.nan
         return out
+
+    def _reindex_plan(self, source_ids: tuple[int, ...]) -> tuple[np.ndarray, np.ndarray]:
+        """(column to take per output channel, output columns with no source)."""
+        cached = self._reindex_cache.get(source_ids)
+        if cached is not None:
+            return cached
+        where = {cid: i for i, cid in enumerate(source_ids)}
+        take = np.zeros(len(self.channel_order), dtype=np.intp)
+        absent = []
+        for col, cid in enumerate(self.channel_order):
+            index = where.get(cid)
+            if index is None:
+                absent.append(col)     # take[col] stays 0; overwritten with NaN
+            else:
+                take[col] = index
+        plan = (take, np.asarray(absent, dtype=np.intp))
+        # Bounded by how many distinct channel sets one board can report, which
+        # in practice is one or two.
+        if len(self._reindex_cache) > 8:
+            self._reindex_cache.clear()
+        self._reindex_cache[source_ids] = plan
+        return plan
 
     def _on_status(self, status: dict) -> None:
         self.status = status

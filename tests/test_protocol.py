@@ -10,6 +10,7 @@ from tjiptemp.protocol.framing import (
     Frame,
     FrameReader,
     FramingError,
+    _crc16_reference,
     cobs_decode,
     cobs_encode,
     crc16,
@@ -21,6 +22,35 @@ from tjiptemp.protocol.framing import (
 def test_crc16_ccitt_false_reference_vector():
     # The canonical check value for CRC-16/CCITT-FALSE over "123456789".
     assert crc16(b"123456789") == 0x29B1
+
+
+def test_crc16_matches_the_longhand_definition():
+    """The fast path delegates to binascii; this is what says it is the same CRC.
+
+    ``crc16`` is ``binascii.crc_hqx``, which is C and some forty times quicker
+    than the byte loop the firmware mirrors. That is only safe as long as the two
+    agree on every input, including the seeds and lengths the wire actually uses.
+    """
+    import os
+    import random
+
+    random.seed(20260908)
+    cases = [b"", b"\x00", b"\xff", bytes(range(256)), b"123456789"]
+    cases += [os.urandom(random.randint(1, 2048)) for _ in range(200)]
+    for data in cases:
+        assert crc16(data) == _crc16_reference(data), data[:32]
+        # The seed is exposed for incremental use; it must track too.
+        assert crc16(data, 0x1D0F) == _crc16_reference(data, 0x1D0F)
+
+
+def test_cobs_encode_run_boundaries():
+    """The 254-byte run boundary is where a hand-rolled COBS usually breaks."""
+    for length in (0, 1, 253, 254, 255, 256, 507, 508, 509):
+        for tail in (b"", b"\x00", b"\x00A", b"A"):
+            payload = b"\x01" * length + tail
+            encoded = cobs_encode(payload)
+            assert 0 not in encoded
+            assert cobs_decode(encoded) == payload
 
 
 @pytest.mark.parametrize(

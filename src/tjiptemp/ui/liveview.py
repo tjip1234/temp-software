@@ -287,10 +287,22 @@ class LiveView(QWidget):
         if not paused:
             self.refresh(force=True)
 
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """Catch up the moment this board's tab comes back on screen."""
+        super().showEvent(event)
+        self.refresh(force=True)
+
     def refresh(self, force: bool = False) -> None:
         if self.paused and not force:
             return
         if not self._plots:
+            return
+        # Every connected board owns a LiveView with its own timer, but only one
+        # tab is on screen. Decimating and redrawing the other boards' traces
+        # produces pixels nobody can see, and with several boards that was the
+        # largest single cost in the UI. showEvent brings a tab up to date when
+        # it is selected, so nothing is stale by the time it is looked at.
+        if not force and not self.isVisible():
             return
 
         gen = self.device.live.generation

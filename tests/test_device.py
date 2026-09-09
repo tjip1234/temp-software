@@ -453,3 +453,59 @@ async def test_a_board_without_a_simulator_is_not_asked_for_a_table(runtime, mon
     finally:
         await dev.close()
 
+
+# ---------------------------------------------------------------- reindexing
+
+def test_reindex_maps_columns_and_nans_the_missing_ones():
+    """A board that reports a subset, or a different order, must still land in
+    the canonical columns — with absent channels NaN rather than zero."""
+    import numpy as np
+
+    from tjiptemp.device.device import Device
+    from tjiptemp.protocol.messages import SampleBlock
+
+    device = Device(serial="TJIP-TEST")
+    device.channel_order = (1, 2, 3, 4)
+
+    # Out of order, and channel 3 missing entirely.
+    block = SampleBlock(
+        first_seq=0, t0_us=0, dt_us=1000, channel_ids=(4, 1, 2),
+        data=np.array([[40.0, 10.0, 20.0], [41.0, 11.0, 21.0]], dtype=np.float32),
+    )
+    out = device._reindex(block)
+    assert out.shape == (2, 4)
+    assert np.allclose(out[:, 0], [10.0, 11.0])       # channel 1
+    assert np.allclose(out[:, 1], [20.0, 21.0])       # channel 2
+    assert np.all(np.isnan(out[:, 2]))                # channel 3 absent
+    assert np.allclose(out[:, 3], [40.0, 41.0])       # channel 4
+
+    # The plan is cached, and the cached path must give the same answer.
+    assert np.allclose(device._reindex(block), out, equal_nan=True)
+
+    # An exactly-matching block is passed through untouched, no copy.
+    same = SampleBlock(
+        first_seq=0, t0_us=0, dt_us=1000, channel_ids=(1, 2, 3, 4),
+        data=np.zeros((2, 4), dtype=np.float32),
+    )
+    assert device._reindex(same) is same.data
+
+
+def test_reindex_plan_is_rebuilt_when_the_channel_order_changes():
+    """The cache is keyed on the source ids, so a new canonical order has to
+    invalidate it or every subsequent block lands in the wrong columns."""
+    import numpy as np
+
+    from tjiptemp.device.device import Device
+    from tjiptemp.protocol.messages import SampleBlock
+
+    device = Device(serial="TJIP-TEST")
+    device.channel_order = (1, 2)
+    block = SampleBlock(
+        first_seq=0, t0_us=0, dt_us=1000, channel_ids=(2, 1),
+        data=np.array([[20.0, 10.0]], dtype=np.float32),
+    )
+    assert np.allclose(device._reindex(block), [[10.0, 20.0]])
+
+    device.channel_order = (2, 1)
+    device._reindex_cache.clear()          # what _apply_info does on a new set
+    assert np.allclose(device._reindex(block), [[20.0, 10.0]])

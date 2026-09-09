@@ -13,6 +13,16 @@ twice, at ``i`` and ``i + capacity``, which makes any window of up to ``capacity
 samples a contiguous slice with no copy at all. It costs 2x memory -- 100 Hz x 15
 channels x 10 minutes is about 7 MB doubled, which is a fine trade for never
 copying on the render path.
+
+Values are stored **channel-major**, ``(n_channels, 2 * capacity)``. The renderer
+never wants a row: it wants one channel over a span, once per channel per frame.
+Row-major storage makes that a strided gather down a column, which numpy has to
+materialise into a new array before it can be reshaped or drawn -- so the buffer
+would copy on exactly the path it exists to keep copy-free. Channel-major makes a
+channel's span a contiguous slice, and the public ``(n, n_channels)`` shape is
+recovered with a transposed view, which costs nothing. The transpose moves the
+strided access to ``append``, which touches a block of samples once, rather than
+to the render loop, which touches the whole window per channel ten times a second.
 """
 
 from __future__ import annotations
@@ -28,7 +38,7 @@ class ChannelRing:
         self.n_channels = int(n_channels)
         # Doubled storage so any recent window is contiguous.
         self._t = np.zeros(self.capacity * 2, dtype=np.float64)      # UTC seconds
-        self._v = np.full((self.capacity * 2, self.n_channels), np.nan, dtype=np.float32)
+        self._v = np.full((self.n_channels, self.capacity * 2), np.nan, dtype=np.float32)
         self._seq = np.zeros(self.capacity * 2, dtype=np.int64)
         self._cursor = 0     # next write index in [0, capacity)
         self._count = 0      # total rows ever written
@@ -67,10 +77,12 @@ class ChannelRing:
 
     def _write(self, at: int, times_s, values, seqs) -> None:
         n = len(times_s)
+        # values arrives (n, n_channels); the store is (n_channels, 2*capacity).
+        block = np.asarray(values).T
         self._t[at : at + n] = times_s
-        self._v[at : at + n] = values
+        self._v[:, at : at + n] = block
         self._t[at + self.capacity : at + self.capacity + n] = times_s
-        self._v[at + self.capacity : at + self.capacity + n] = values
+        self._v[:, at + self.capacity : at + self.capacity + n] = block
         if seqs is not None:
             self._seq[at : at + n] = seqs
             self._seq[at + self.capacity : at + self.capacity + n] = seqs
@@ -92,15 +104,18 @@ class ChannelRing:
         return self._count
 
     def view(self, last_n: int | None = None) -> tuple[np.ndarray, np.ndarray]:
-        """Contiguous ``(times, values)`` views of the most recent rows. No copy."""
+        """``(times, values)`` views of the most recent rows. No copy.
+
+        ``values`` is ``(n, n_channels)`` as callers expect, but it is a
+        transposed view of channel-major storage, so ``values[:, i]`` — one
+        channel, which is what every caller actually asks for — is contiguous.
+        """
         size = self.size
         if size == 0:
-            return self._t[:0], self._v[:0]
+            return self._t[:0], self._v[:, :0].T
         n = size if last_n is None else min(last_n, size)
         start = (self._cursor - n) % self.capacity
-        if start + n <= self.capacity * 2:
-            return self._t[start : start + n], self._v[start : start + n]
-        return self._t[start:], self._v[start:]  # pragma: no cover - unreachable
+        return self._t[start : start + n], self._v[:, start : start + n].T
 
     def window(self, seconds: float, now_s: float | None = None) -> tuple[np.ndarray, np.ndarray]:
         """Rows within the last ``seconds``, by timestamp rather than by count."""
@@ -116,7 +131,7 @@ class ChannelRing:
         if self.size == 0:
             return None
         i = (self._cursor - 1) % self.capacity
-        return float(self._t[i]), self._v[i]
+        return float(self._t[i]), self._v[:, i]
 
     def clear(self) -> None:
         self._cursor = 0
@@ -133,7 +148,7 @@ class ChannelRing:
         keep = min(len(t), capacity)
         self.capacity = capacity
         self._t = np.zeros(capacity * 2, dtype=np.float64)
-        self._v = np.full((capacity * 2, self.n_channels), np.nan, dtype=np.float32)
+        self._v = np.full((self.n_channels, capacity * 2), np.nan, dtype=np.float32)
         self._seq = np.zeros(capacity * 2, dtype=np.int64)
         self._cursor = 0
         self._count = 0

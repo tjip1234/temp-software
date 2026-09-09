@@ -506,7 +506,7 @@ class MainWindow(QMainWindow):
         if self.app.broadcast.running:
             state = self.app.broadcast.status()
             reading = state.get("reading")
-            text = "thermometer :%d" % self.app.settings.broadcast_port
+            text = f"thermometer :{self.app.settings.broadcast_port}"
             if reading:
                 text += f" {reading['temperature']:.1f}{reading['unit']}"
             self.status_broadcast.setText(text)

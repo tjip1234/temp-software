@@ -269,6 +269,21 @@ static void emit_vectors(void)
 
     n = tjip_time_echo_build(0x1122334455667788ull, 111, 222, wire, sizeof wire);
     print_hex("timeecho ", wire, n);
+
+    /* COBS changes behaviour at a run of 254 non-zero bytes, which is where an
+     * implementation on either side is most likely to diverge. Pin the three
+     * cases either side of it: a run that stops just short, one that lands
+     * exactly on the boundary, and one that carries a zero immediately after. */
+    uint8_t run[260];
+    memset(run, 0x41, sizeof run);
+    n = tjip_encode(TJIP_MSG_LOG, 0, 1, run, 253, wire, sizeof wire);
+    print_hex("cobs253 ", wire, n);
+    n = tjip_encode(TJIP_MSG_LOG, 0, 2, run, 254, wire, sizeof wire);
+    print_hex("cobs254 ", wire, n);
+    run[254] = 0x00;
+    run[255] = 0x42;
+    n = tjip_encode(TJIP_MSG_LOG, 0, 3, run, 256, wire, sizeof wire);
+    print_hex("cobszero ", wire, n);
 }
 
 int main(int argc, char **argv)

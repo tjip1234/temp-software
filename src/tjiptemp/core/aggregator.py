@@ -23,8 +23,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-import numpy as np
-
 from ..protocol.messages import SampleBlock
 
 #: Wait this long after noticing a hole before asking the device to resend it.

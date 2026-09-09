@@ -25,25 +25,36 @@ over USB, WiFi or Bluetooth.
 | `docs/protocol.md` | **TJIP-1**, the wire protocol. Normative, and implementable from this file alone. |
 | `firmware-ref/` | Portable C reference codec for the firmware side, plus its tests. |
 | `src/tjiptemp/` | The application. |
-| `packaging/` | AUR, DEB, macOS `.dmg`, Windows installer. |
+| `packaging/` | The three shipped builds: Linux `.AppImage`, macOS `.dmg`, Windows `.exe`. |
 | `tests/` | 128 tests, including a full simulated board. |
 
 ## Install
 
-**Arch / AUR**
+Three builds, one per platform, all from Releases:
+
+| Platform | File | Notes |
+|---|---|---|
+| Linux | `TjipTemp-<version>-x86_64.AppImage` | `chmod +x` it and run. No installation. |
+| macOS | `TjipTemp-<version>.dmg` | Unsigned builds need right-click → Open once. |
+| Windows | `TjipTemp-Setup-<version>.exe` | Windows 10+ needs no driver: the board is a COM port. |
+
+Building them yourself needs only Python and the platform's own toolchain:
 
 ```sh
-cd packaging/aur && makepkg -si
+./packaging/linux/build_appimage.sh          # dist/TjipTemp-<version>-<arch>.AppImage
+./packaging/macos/build.sh                   # dist/TjipTemp-<version>.dmg
+powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1   # dist\*.exe
 ```
 
-**Debian / Ubuntu**
+Each script picks up an activated virtualenv or the project's `.venv` before
+falling back to `python3`; set `PYTHON=/path/to/python` to override. The app
+icon is generated, not committed as a blob — `packaging/make_icons.py` draws it
+and writes the PNG, ICO and ICNS the three builds need.
 
-```sh
-./packaging/debian/build.sh && sudo dpkg -i build/tjiptemp_*.deb
-```
-
-**macOS / Windows** — download the `.dmg` or the installer from Releases, or
-build with `./packaging/macos/build.sh` / `packaging\windows\build.ps1`.
+**AppImages and glibc.** glibc is not forward-compatible, so an AppImage built
+on a recent distribution will not start on an older one. Build on the oldest
+distribution you intend to support; the release workflow uses Ubuntu 22.04 for
+this reason.
 
 **From source, any platform**
 
@@ -142,6 +153,24 @@ regular tick. Instead the host runs SNTP-style exchanges, keeps the low-latency
 ones, and weighted-least-squares fits `utc = a·device_us + b`. The slope is the
 crystal error in ppm, which is genuinely useful: 40 ppm is a second of skew over
 an eight-hour soak. Every recording stores its fit and its uncertainty.
+
+**The wire path is C, not a byte loop.** Every frame in both directions is
+COBS-framed and CRC-16 checked. Done a byte at a time in Python that was a real
+fraction of a core at 100 Hz across two links — so the CRC is `binascii.crc_hqx`,
+which is exactly CRC-16/CCITT-FALSE with the seed exposed, and COBS works over
+the runs between zero bytes rather than over each byte. Framing a sample block
+costs 3 µs rather than 78 µs. `test_protocol` holds the fast CRC against the
+longhand definition the firmware mirrors, over random buffers, so "it is the same
+checksum" is checked rather than asserted.
+
+**The live buffer is channel-major.** The renderer never wants a row; it wants
+one channel over a span, once per channel per frame. Storing rows would make that
+a strided gather that numpy has to materialise before it can draw it — a copy on
+exactly the path the buffer exists to keep copy-free. Storage is transposed and
+the public `(rows, channels)` shape is recovered with a view, which costs
+nothing, and only the visible board's charts are redrawn at all: every connected
+board owns a chart with its own timer, and decimating the ones behind other tabs
+produced pixels nobody could see.
 
 **Redundant links deduplicate by sequence number.** Every row carries a
 device-assigned sequence. Run USB and WiFi together and the host takes whichever

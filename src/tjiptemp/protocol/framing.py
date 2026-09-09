@@ -14,6 +14,7 @@ in, bytes out, and is the piece the firmware mirrors in ``firmware-ref/tjip_prot
 
 from __future__ import annotations
 
+import binascii
 import struct
 from dataclasses import dataclass
 
@@ -36,6 +37,20 @@ class FramingError(Exception):
 
 # --------------------------------------------------------------------------- CRC
 
+def _crc16_reference(data: bytes, seed: int = 0xFFFF) -> int:
+    """CRC-16/CCITT-FALSE, written out longhand.
+
+    This is the definition ``docs/protocol.md`` §2 states and the firmware
+    mirrors — poly 0x1021, init 0xFFFF, no reflection, no final xor — kept as
+    executable documentation and as the oracle the fast path is tested against.
+    Nothing on the wire path calls it.
+    """
+    crc = seed
+    for byte in data:
+        crc = ((crc << 8) & 0xFFFF) ^ _CRC_TABLE[((crc >> 8) ^ byte) & 0xFF]
+    return crc
+
+
 def _build_crc_table() -> list[int]:
     table = []
     for byte in range(256):
@@ -50,32 +65,38 @@ _CRC_TABLE = _build_crc_table()
 
 
 def crc16(data: bytes, seed: int = 0xFFFF) -> int:
-    """CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, no reflection, no final xor."""
-    crc = seed
-    for byte in data:
-        crc = ((crc << 8) & 0xFFFF) ^ _CRC_TABLE[((crc >> 8) ^ byte) & 0xFF]
-    return crc
+    """CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, no reflection, no final xor.
+
+    ``binascii.crc_hqx`` is precisely this algorithm with the seed exposed, and
+    being C it runs some forty times faster than the byte loop it replaces —
+    which matters because every frame in both directions is checksummed, and at
+    100 Hz across two links that loop was a real fraction of a core. The longhand
+    version above stays as the definition, and ``test_protocol`` holds the two
+    against each other over random buffers.
+    """
+    return binascii.crc_hqx(data, seed)
 
 
 # -------------------------------------------------------------------------- COBS
 
 def cobs_encode(data: bytes) -> bytes:
-    """Consistent Overhead Byte Stuffing. Output contains no 0x00 bytes."""
+    """Consistent Overhead Byte Stuffing. Output contains no 0x00 bytes.
+
+    COBS is defined over the runs of non-zero bytes between the zeros, so this
+    splits on the zeros and copies each run wholesale rather than appending one
+    byte at a time. A run of 254 or more needs no zero to terminate it, which is
+    the inner loop; everything else is one code byte plus a slice copy.
+    """
     out = bytearray()
-    code_index = 0
-    out.append(0)  # placeholder for the first code byte
-    code = 1
-    for byte in data:
-        if byte != 0:
-            out.append(byte)
-            code += 1
-            if code != 0xFF:
-                continue
-        out[code_index] = code
-        code_index = len(out)
-        out.append(0)
-        code = 1
-    out[code_index] = code
+    for run in data.split(b"\x00"):
+        # A maximal run carries no terminating zero, so it is emitted with the
+        # 0xFF code and the remainder continues as if it were a fresh run.
+        while len(run) >= 0xFE:
+            out.append(0xFF)
+            out += run[:0xFE]
+            run = run[0xFE:]
+        out.append(len(run) + 1)
+        out += run
     return bytes(out)
 
 

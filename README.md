@@ -81,14 +81,23 @@ and resync work.
 ## Usage
 
 ```sh
-tjiptemp                      # GUI, auto-connects to USB boards
+tjiptemp                      # GUI, connects to nothing until you ask
 tjiptemp --list               # what can I see?
 tjiptemp -c /dev/ttyACM0      # connect to a specific board
+tjiptemp --auto-connect       # scan USB and connect to whatever answers
 tjiptemp --headless --record  # no GUI: log and serve the API
+tjiptemp --broadcast          # also publish a channel as a network thermometer
 ```
 
 Headless mode does not import Qt at all, so it runs on a Raspberry Pi sitting
 next to an experiment.
+
+## Broadcasting to VNA Studio
+
+TjipTemp can publish one channel as a network thermometer, discoverable over
+mDNS and a UDP beacon, so VNA Studio overlays the live temperature on a
+dielectric recording. Off by default; **Toolbar → Broadcast temperature…** or
+`--broadcast`. See [docs/thermometer-broadcast.md](docs/thermometer-broadcast.md).
 
 ## The API
 
@@ -154,6 +163,30 @@ indistinguishable from a plain voltage offset — the Seebeck coefficient barely
 moves across any plausible cold-junction range — so the fitter refuses to report
 one from hot-junction points and tells you to calibrate the cold junction
 directly instead.
+
+**Nothing is connected until you say so.** Starting the program does not scan
+for boards: opening a serial port takes it away from whatever else has it open,
+and on an ESP32-S3 opening the CDC port moves the modem lines on a board that
+may be mid-measurement. "Find USB boards" in the toolbar runs the scan, Connect…
+takes an address, and the checkbox in Settings turns startup scanning back on if
+you want it. Headless: `--connect ADDRESS`, or `--auto-connect` to scan.
+
+**The board's settings win on connect.** A board applies its stored
+configuration the moment it powers up, host or no host — that is the point of a
+box on a DIN rail. So connecting is one-way: the desktop reads the board's
+sample rate, sensor setup and simulator table and shows those, rather than
+pushing whatever it happened to remember from last time. Changing a setting
+afterwards is an explicit push, because someone asked for it. The rate in
+Settings is the starting point for a board that does not report one.
+
+**Connecting does not reset the board.** An ESP32-S3's USB-Serial-JTAG resets
+the chip when the host moves DTR and RTS in the sequence esptool uses, and it
+watches for a *sequence*, so two ioctls — one per line — are enough to trigger
+it by accident. Both lines are written in a single `TIOCMSET`, `HUPCL` is
+cleared so closing the port does not drop them again, and a handshake that has
+to be retried is retried on the port that is already open. Reopening per retry
+reset the board per retry, which is a good way to keep a slow board from ever
+answering.
 
 **Gaps stay gaps.** A missing or faulted sample exports as an empty cell. Never
 interpolated, never forward-filled, including when resampling.

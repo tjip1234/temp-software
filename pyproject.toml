@@ -34,11 +34,12 @@ dependencies = [
     "websockets>=12.0",
     "zeroconf>=0.131",
     "platformdirs>=4.0",
+    "qasync>=0.27",
 ]
 
 [project.optional-dependencies]
 ble = ["bleak>=0.21"]
-dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff>=0.3", "pyinstaller>=6.4"]
+dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "httpx>=0.27", "ruff>=0.3", "pyinstaller>=6.4"]
 
 [project.scripts]
 tjiptemp = "tjiptemp.__main__:main"

@@ -36,6 +36,7 @@ from . import theme as theme_module
 from .devicetab import DeviceTab
 from .sessions import SessionBrowser
 from .theme import Theme, resolve
+from .widgets import message_later
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +118,12 @@ class ConnectDialog(QDialog):
         return self.address.text().strip() or None
 
 
+async def _push_rate(device, rate_hz: float) -> None:
+    with contextlib.suppress(Exception):
+        await device.set_config({"acquire": {"rate_hz": rate_hz}})
+        await device.start_streaming(rate_hz)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, app: Application, parent=None) -> None:
         super().__init__(parent)
@@ -144,11 +151,29 @@ class SettingsDialog(QDialog):
         self.rate.setRange(1, 100)
         self.rate.setValue(int(settings.stream_rate_hz))
         self.rate.setSuffix(" Hz")
-        form.addRow("Default stream rate", self.rate)
+        self.rate.setToolTip(
+            "Connecting adopts whatever rate the board is already set to, so this "
+            "is only the starting point for a board that does not report one. "
+            "Changing it here does apply to the boards that are connected now."
+        )
+        form.addRow("Sample rate", self.rate)
 
         self.auto_usb = QCheckBox("Connect to USB boards automatically at startup")
+        self.auto_usb.setToolTip(
+            "Off by default: starting the program should not claim a serial port "
+            "out from under whatever else is using it. Use \"Find USB boards\" in "
+            "the toolbar when you want the scan."
+        )
         self.auto_usb.setChecked(settings.auto_connect_usb)
         form.addRow(self.auto_usb)
+
+        self.auto_reconnect = QCheckBox("Reconnect automatically when a board drops out")
+        self.auto_reconnect.setToolTip(
+            "Retries the address a board was last reached on, backing off to once "
+            "a minute. A board you disconnect yourself is left alone."
+        )
+        self.auto_reconnect.setChecked(settings.auto_reconnect)
+        form.addRow(self.auto_reconnect)
 
         self.mdns = QCheckBox("Find boards on the network (mDNS)")
         self.mdns.setChecked(settings.mdns_discovery)
@@ -193,8 +218,16 @@ class SettingsDialog(QDialog):
         settings = self.app.settings
         settings.temperature_unit = self.unit.currentData()
         settings.theme = self.theme_box.currentData()
-        settings.stream_rate_hz = float(self.rate.value())
+        rate = float(self.rate.value())
+        if rate != settings.stream_rate_hz:
+            # Typed into a dialog and confirmed: an instruction, not a stale
+            # preference, so it is the one case that overrules the board.
+            for device in self.app.devices.online:
+                asyncio.ensure_future(_push_rate(device, rate))
+        settings.stream_rate_hz = rate
         settings.auto_connect_usb = self.auto_usb.isChecked()
+        settings.auto_reconnect = self.auto_reconnect.isChecked()
+        self.app.devices.auto_reconnect = settings.auto_reconnect
         settings.mdns_discovery = self.mdns.isChecked()
         settings.api_enabled = self.api_enabled.isChecked()
         settings.api_host = self.api_host.text().strip() or "127.0.0.1"
@@ -210,6 +243,11 @@ class MainWindow(QMainWindow):
         self.app = app
         self.theme: Theme = resolve(app.settings.theme)
         self._tabs: dict[str, DeviceTab] = {}
+
+        #: Set once the window has accepted a close. ``__main__.run_gui`` waits
+        #: on this and then shuts the application down on a still-running event
+        #: loop; Qt's own ``aboutToQuit`` fires too late to be useful for that.
+        self.closed = asyncio.Event()
 
         self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(1420, 900)
@@ -268,6 +306,14 @@ class MainWindow(QMainWindow):
         api.triggered.connect(self._copy_api_url)
         bar.addAction(api)
 
+        broadcast = QAction("Broadcast temperature…", self)
+        broadcast.setToolTip(
+            "Publish a channel as a network thermometer for VNA Studio and "
+            "anything else that speaks the same protocol."
+        )
+        broadcast.triggered.connect(self._on_broadcast)
+        bar.addAction(broadcast)
+
         about = QAction("About", self)
         about.triggered.connect(self._on_about)
         bar.addAction(about)
@@ -275,10 +321,12 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self) -> None:
         self.status_devices = QLabel("No boards connected")
         self.status_api = QLabel("")
+        self.status_broadcast = QLabel("")
         self.status_db = QLabel("")
         bar = self.statusBar()
         bar.addWidget(self.status_devices, 1)
         bar.addPermanentWidget(self.status_api)
+        bar.addPermanentWidget(self.status_broadcast)
         bar.addPermanentWidget(self.status_db)
 
     # ------------------------------------------------------------------ events
@@ -330,7 +378,7 @@ class MainWindow(QMainWindow):
         try:
             await self.app.connect(target)
         except Exception as exc:
-            QMessageBox.critical(
+            message_later("critical",
                 self, "Could not connect",
                 f"{exc}\n\nIf this is a serial port, check that no other program has "
                 f"it open and that you have permission to use it."
@@ -339,7 +387,7 @@ class MainWindow(QMainWindow):
     async def _auto_connect(self) -> None:
         found = await self.app.auto_connect()
         if not found:
-            QMessageBox.information(
+            message_later("information",
                 self, "No boards found",
                 "No TjipTemp board answered on any USB serial port.\n\n"
                 "Check the cable, and on Linux that you are in the 'dialout' group "
@@ -398,7 +446,16 @@ class MainWindow(QMainWindow):
         try:
             await self.app.start_api()
         except Exception as exc:
-            QMessageBox.warning(self, "API server not started", str(exc))
+            message_later("warning", self, "API server not started", str(exc))
+
+    def _on_broadcast(self) -> None:
+        from .broadcastdialog import BroadcastDialog
+
+        dialog = BroadcastDialog(self.app, self.theme, self)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def _copy_api_url(self) -> None:
         from PySide6.QtWidgets import QApplication
@@ -443,6 +500,22 @@ class MainWindow(QMainWindow):
         self.status_api.setText(
             f"API {self.app.api_url}" if self.app.api_running else "API off"
         )
+
+        # Only shown while it is on: an always-visible "off" for a feature most
+        # people never use is just noise in the status bar.
+        if self.app.broadcast.running:
+            state = self.app.broadcast.status()
+            reading = state.get("reading")
+            text = "thermometer :%d" % self.app.settings.broadcast_port
+            if reading:
+                text += f" {reading['temperature']:.1f}{reading['unit']}"
+            self.status_broadcast.setText(text)
+            self.status_broadcast.setToolTip(
+                f"{state['url']}\n{state.get('problem') or 'publishing'}"
+            )
+        else:
+            self.status_broadcast.setText("")
+            self.status_broadcast.setToolTip("")
         stats = self.app.db.stats()
         self.status_db.setText(
             f"{stats['sessions']} recordings · {stats['rows']:,} samples"
@@ -486,3 +559,4 @@ class MainWindow(QMainWindow):
             with contextlib.suppress(Exception):
                 tab.close_tab()
         event.accept()
+        self.closed.set()

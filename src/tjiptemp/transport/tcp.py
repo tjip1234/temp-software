@@ -17,7 +17,22 @@ import asyncio
 from ..protocol.messages import DEFAULT_TCP_PORT
 from .base import Transport, TransportError, TransportInfo
 
-CONNECT_TIMEOUT_S = 5.0
+#: One attempt's budget. A board that is up answers in milliseconds; this only
+#: has to cover a busy network.
+CONNECT_TIMEOUT_S = 10.0
+
+#: How long to keep retrying before giving up, and how long to wait between
+#: attempts.
+#:
+#: A board that has just rebooted is not merely slow to answer, it is not
+#: listening at all: it prints its boot report, may sweep its wiper table, then
+#: brings up WiFi and has to associate and get a lease before the TCP server
+#: exists. That is comfortably tens of seconds, and a single five-second
+#: attempt lands in the middle of it and reports a board that is not there.
+#: So a connect is a window, not one shot.
+CONNECT_WINDOW_S = 45.0
+CONNECT_RETRY_S = 2.0
+
 READ_CHUNK = 8192
 
 
@@ -51,17 +66,34 @@ class TcpTransport(Transport):
         self._task: asyncio.Task | None = None
 
     async def _open_impl(self) -> None:
-        try:
-            self._reader_stream, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(self.host, self.port), timeout=CONNECT_TIMEOUT_S
-            )
-        except TimeoutError as exc:
+        deadline = asyncio.get_running_loop().time() + CONNECT_WINDOW_S
+        last: Exception | None = None
+        attempts = 0
+
+        while True:
+            attempts += 1
+            try:
+                self._reader_stream, self._writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.host, self.port),
+                    timeout=CONNECT_TIMEOUT_S,
+                )
+                break
+            except (TimeoutError, OSError) as exc:
+                # A refused connection is the normal answer from a board that
+                # is booting: the host is up, the TCP server is not yet. It is
+                # worth waiting for, not worth reporting.
+                last = exc
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(CONNECT_RETRY_S)
+
+        if self._writer is None:
             raise TransportError(
-                f"{self.host}:{self.port} did not answer within {CONNECT_TIMEOUT_S:.0f} s. "
-                "Check the board is on the same network and its WiFi is provisioned."
-            ) from exc
-        except OSError as exc:
-            raise TransportError(f"{self.host}:{self.port}: {exc}") from exc
+                f"{self.host}:{self.port} did not answer in {CONNECT_WINDOW_S:.0f} s "
+                f"({attempts} attempts). Check the board is on the same network, "
+                f"that its WiFi is provisioned, and that it is not stuck in a "
+                f"reboot loop — the last error was: {last}"
+            ) from last
 
         sock = self._writer.get_extra_info("socket")
         if sock is not None:
@@ -118,17 +150,3 @@ class TcpTransport(Transport):
                 pass
 
 
-async def probe_tcp(host: str, port: int = DEFAULT_TCP_PORT, timeout: float = 1.5) -> bool:
-    """Cheap reachability check for the manual 'add device by IP' path."""
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port), timeout=timeout
-        )
-    except (OSError, TimeoutError):
-        return False
-    writer.close()
-    try:
-        await writer.wait_closed()
-    except (OSError, ConnectionError):
-        pass
-    return True

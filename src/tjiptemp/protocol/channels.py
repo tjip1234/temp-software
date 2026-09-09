@@ -30,6 +30,11 @@ class Ch(IntEnum):
     AHT20_RH = 12
     PT1000_R = 13
     TYPEK_UV = 14
+    # DIN-6 additions. Spec §13: new channels do not bump `proto`.
+    NTC_EXT4 = 15
+    SIM_SETPOINT = 16
+    SIM_ACTUAL = 17
+    SIM_R = 18
 
 
 class Kind:
@@ -40,6 +45,7 @@ class Kind:
     VOLT = "volt"
     HYGRO = "hygro"
     RAW = "raw"
+    SIM = "sim"
 
 
 # --------------------------------------------------------------------- palette
@@ -55,8 +61,15 @@ class Kind:
 # There are more channels than slots, which is deliberate rather than an oversight:
 #
 # * The eight slots go to the eight channels people actually plot together.
-# * Two board-internal NTCs are diagnostics, not subjects. They get recessive grey
-#   and are drawn dashed, so their identity never rests on hue alone.
+# * The three board-internal NTCs are diagnostics, not subjects. They get recessive
+#   grey and are drawn dashed, so their identity never rests on hue alone.
+# * Two pairs of channels can never appear on the same board, so they share a slot
+#   without ambiguity: NTC CN4 and the AHT20 temperature (the DIN-6 has a fourth
+#   external thermistor and no humidity sensor; its predecessor is the reverse).
+# * The simulator's setpoint and output are one quantity in two states, not two
+#   subjects, so they share a hue and separate by dash. They are meant to be read
+#   against each other and against whichever channel is driving them — seeing them
+#   diverge is the whole point of plotting them.
 # * Channels in other units (volts, %RH, ohms, microvolts) never share an axis with
 #   a temperature -- they are separate plots -- so they reuse the slot colours
 #   without ambiguity.
@@ -71,8 +84,8 @@ _SLOTS_DARK = ("#3987e5", "#d95926", "#199e70", "#c98500",
 
 #: Deliberately low-chroma: these recede, and carry a dashed stroke as secondary
 #: encoding so they remain identifiable without relying on colour.
-_MUTED_LIGHT = ("#6b6a66", "#8a8984")
-_MUTED_DARK = ("#a3a29a", "#7d7c76")
+_MUTED_LIGHT = ("#6b6a66", "#8a8984", "#9a9992")
+_MUTED_DARK = ("#a3a29a", "#7d7c76", "#8e8d86")
 
 _SLOT_OF = {
     # temperature group -- these eight can appear on one axis together
@@ -82,18 +95,25 @@ _SLOT_OF = {
     Ch.NTC_EXT2: 3,
     Ch.NTC_EXT3: 4,
     Ch.AHT20_T: 5,
+    Ch.NTC_EXT4: 5,        # never on the same board as AHT20_T
     Ch.TYPEK_CJ: 6,
-    Ch.NTC_BRD_CHG: 7,
+    Ch.SIM_ACTUAL: 7,
+    Ch.SIM_SETPOINT: 7,    # same hue as SIM_ACTUAL, separated by dash
     # other units -- own plots, so slot reuse is unambiguous
     Ch.V_BAT: 0,
     Ch.V_CC: 1,
     Ch.AHT20_RH: 2,
     Ch.PT1000_R: 0,
     Ch.TYPEK_UV: 1,
+    Ch.SIM_R: 2,
 }
 
 #: Diagnostics: grey, dashed, and never competing with a probe for attention.
-_MUTED_OF = {Ch.NTC_BRD_RTD: 0, Ch.NTC_BRD_TC: 1}
+#: All three board-internal thermistors, on either board. NTC_BRD_RTD earns its
+#: keep on the DIN-6 — it is the digipot's temperature and gates the simulator's
+#: staleness check — but that is a job for the simulator panel, which shows it
+#: with its drift, not a reason to give it a probe's colour in a chart.
+_MUTED_OF = {Ch.NTC_BRD_RTD: 0, Ch.NTC_BRD_TC: 1, Ch.NTC_BRD_CHG: 2}
 
 
 def color_for(channel_id: int, dark: bool = False) -> str:
@@ -107,9 +127,15 @@ def color_for(channel_id: int, dark: bool = False) -> str:
     return (_SLOTS_DARK if dark else _SLOTS_LIGHT)[slot]
 
 
+#: Channels drawn dashed for reasons other than being a diagnostic.
+_DASHED = {int(Ch.SIM_SETPOINT)}
+
+
 def dash_for(channel_id: int) -> str:
     """Secondary encoding, so identity never rests on hue alone."""
-    return "dashed" if channel_id in _MUTED_OF else "solid"
+    if channel_id in _MUTED_OF or channel_id in _DASHED:
+        return "dashed"
+    return "solid"
 
 
 _COLORS = {ch: color_for(int(ch)) for ch in Ch}
@@ -197,6 +223,18 @@ DEFAULT_CHANNELS: tuple[ChannelSpec, ...] = (
     _spec(Ch.AHT20_RH, "aht20_rh", "AHT20 RH", "%RH", Kind.HYGRO, decimals=2, cal="linear"),
     _spec(Ch.PT1000_R, "pt1000_r", "PT1000 raw", "ohm", Kind.RAW, decimals=4, secondary=True),
     _spec(Ch.TYPEK_UV, "typek_uv", "Type K raw", "uV", Kind.RAW, decimals=2, secondary=True),
+    # --- DIN-6 ---
+    _spec(Ch.NTC_EXT4, "ntc_ext4", "NTC TEMP4", "degC", Kind.NTC, decimals=2, temp=True,
+          cal="steinhart", probe=True),
+    # The simulator's own channels are measurements of what the board is
+    # presenting to a hotplate, not of anything physical, so nothing calibrates
+    # them: they are already expressed through the measured wiper table.
+    _spec(Ch.SIM_SETPOINT, "sim_setpoint", "Sim setpoint", "degC", Kind.SIM,
+          decimals=2, temp=True),
+    _spec(Ch.SIM_ACTUAL, "sim_actual", "Sim output", "degC", Kind.SIM,
+          decimals=2, temp=True),
+    _spec(Ch.SIM_R, "sim_r", "Sim output raw", "ohm", Kind.RAW, decimals=1,
+          secondary=True),
 )
 
 BY_ID: dict[int, ChannelSpec] = {c.id: c for c in DEFAULT_CHANNELS}

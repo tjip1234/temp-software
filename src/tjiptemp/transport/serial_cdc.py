@@ -15,6 +15,9 @@ and easy to reason about.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import struct
 import threading
 
 import serial
@@ -40,6 +43,39 @@ BRIDGE_IDS: tuple[tuple[int, int], ...] = (
 
 NOMINAL_BAUD = 921600
 READ_CHUNK = 4096
+
+
+def _quiet_modem_lines(ser: serial.Serial) -> None:
+    """Put DTR and RTS low without producing an edge sequence, and keep them there.
+
+    Two things are needed and neither is portable, so both are best-effort:
+
+    ``TIOCMSET`` writes the whole modem-line word at once, where pyserial's
+    ``ser.dtr = False`` / ``ser.rts = False`` are two ioctls and two edges.
+
+    ``HUPCL`` is what makes the kernel drop the lines again when the port is
+    closed. Left on, every close is another pair of edges -- which matters
+    because connecting is not one open: a handshake that has to be retried, or
+    a scan across several ports, opens and closes repeatedly.
+    """
+    if os.name != "posix":
+        # Windows has no TIOCMSET and no HUPCL; pyserial's own setters are the
+        # only option, and the CDC stack there does not pulse on close.
+        with contextlib.suppress(OSError, ValueError):
+            ser.dtr = False
+            ser.rts = False
+        return
+
+    import fcntl
+    import termios
+
+    fd = ser.fileno()
+    with contextlib.suppress(OSError, AttributeError):
+        fcntl.ioctl(fd, termios.TIOCMSET, struct.pack("I", 0))
+    with contextlib.suppress(OSError, termios.error):
+        attrs = termios.tcgetattr(fd)
+        attrs[2] &= ~termios.HUPCL
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
 
 class SerialTransport(Transport):
@@ -77,22 +113,26 @@ class SerialTransport(Transport):
         self._thread.start()
 
     def _blocking_open(self) -> serial.Serial:
-        ser = serial.Serial(
-            port=self.port,
-            baudrate=self.baud,
-            timeout=0.1,
-            write_timeout=2.0,
-            exclusive=True,
-        )
-        # An ESP32-S3 in native USB mode watches DTR/RTS to decide whether to enter
-        # the bootloader. Both asserted low keeps it running the application, which
-        # is what we want -- the alternative is a board that reboots every time the
-        # desktop app connects.
-        try:
-            ser.dtr = False
-            ser.rts = False
-        except OSError:
-            pass  # not all platforms/drivers expose the modem lines
+        # An ESP32-S3's USB-Serial-JTAG resets the chip when it sees DTR and RTS
+        # move in the sequence esptool uses to enter the bootloader. It watches
+        # for a *sequence*, so what matters is not where the lines end up but how
+        # many separate edges the host produces getting there. Two ioctls -- one
+        # for DTR, one for RTS -- are two USB control transfers, and that is the
+        # sequence. The board comes back with rst:0x15 (USB_UART_CHIP_RESET): no
+        # panic, no backtrace, just a reboot whenever this software says hello.
+        #
+        # So every line change here is one TIOCMSET, which carries both bits in
+        # a single transfer and cannot be read as an edge pattern.
+        ser = serial.Serial()
+        ser.port = self.port
+        ser.baudrate = self.baud
+        ser.timeout = 0.1
+        ser.write_timeout = 2.0
+        with contextlib.suppress(AttributeError, ValueError):
+            ser.exclusive = True  # POSIX only
+
+        ser.open()
+        _quiet_modem_lines(ser)
         ser.reset_input_buffer()
         return ser
 
@@ -121,6 +161,22 @@ class SerialTransport(Transport):
         ser = self._serial
         loop = self._loop
         assert ser is not None and loop is not None
+
+        def to_loop(fn, *args) -> bool:
+            """Hand work back to the event loop; False once it has gone away.
+
+            On an abrupt exit the loop can close while this thread is still in
+            a read, and call_soon_threadsafe then raises RuntimeError out of a
+            daemon thread -- a traceback printed after the window has closed,
+            with nothing left to catch it.
+            """
+            try:
+                loop.call_soon_threadsafe(fn, *args)
+                return True
+            except RuntimeError:
+                self._stop.set()
+                return False
+
         try:
             while not self._stop.is_set():
                 try:
@@ -128,13 +184,13 @@ class SerialTransport(Transport):
                     data = ser.read(min(waiting, READ_CHUNK))
                 except (serial.SerialException, OSError, TypeError) as exc:
                     if not self._stop.is_set():
-                        loop.call_soon_threadsafe(self._closed_from_reader, str(exc))
+                        to_loop(self._closed_from_reader, str(exc))
                     return
-                if data:
-                    loop.call_soon_threadsafe(self._ingest, data)
+                if data and not to_loop(self._ingest, data):
+                    return
         finally:
             if not self._stop.is_set():
-                loop.call_soon_threadsafe(self._closed_from_reader, "serial reader stopped")
+                to_loop(self._closed_from_reader, "serial reader stopped")
 
     async def _write_impl(self, data: bytes) -> None:
         ser = self._serial

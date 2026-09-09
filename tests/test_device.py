@@ -319,3 +319,137 @@ async def test_reboot_resets_the_stream(runtime):
         assert device.aggregator.stats.rows_lost == 0
     finally:
         await device.close()
+
+
+# ------------------------------------------------- connecting must not reset
+
+async def test_a_slow_handshake_does_not_reopen_the_port(runtime, monkeypatch):
+    """Retrying HELLO must not reopen the transport.
+
+    Opening a USB CDC port moves DTR and RTS, and on an ESP32-S3 that sequence
+    is what the USB-Serial-JTAG unit resets the chip on. Reopening once per
+    retry therefore reset the board once per retry: a board that was merely slow
+    to answer was reset before it could, and the connect attempt fed itself for
+    the whole window. The retry belongs to the handshake, not to the port.
+    """
+    from tjiptemp.device import device as D
+    from tjiptemp.device.link import Link
+
+    transport = LoopbackTransport(runtime)
+    opens = 0
+    real_open = transport.open
+
+    async def counting_open() -> None:
+        nonlocal opens
+        opens += 1
+        await real_open()
+
+    transport.open = counting_open
+
+    calls = 0
+    real_hello = Link.hello
+
+    async def slow_hello(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise TimeoutError("board still booting")
+        return await real_hello(self, *args, **kwargs)
+
+    monkeypatch.setattr(Link, "hello", slow_hello)
+    monkeypatch.setattr(D, "HANDSHAKE_RETRY_S", 0.01)
+
+    dev = Device()
+    try:
+        await dev.add_transport(transport, start_stream=False)
+        assert dev.state is DeviceState.ONLINE
+        assert calls == 3, "the handshake should have been retried twice"
+        assert opens == 1, "the port was reopened between handshake attempts"
+    finally:
+        await dev.close()
+
+
+# --------------------------------------------- the board's settings win
+
+async def test_connecting_adopts_the_boards_own_sample_rate(runtime):
+    """The board's stored rate wins over whatever the desktop remembered.
+
+    A board applies its NVS configuration the moment it powers up, host or no
+    host. If connecting pushed the desktop's remembered value over the top, the
+    board would be reconfigured by a program that just walked in.
+    """
+    board = runtime.board
+    board.config["acquire"]["rate_hz"] = 25
+
+    manager = DeviceManager()
+    manager.default_rate_hz = 4.0          # what the desktop remembered
+    try:
+        dev = await manager.connect(LoopbackTransport(runtime), start_stream=False)
+        assert dev.stream_rate_hz == 25.0
+    finally:
+        await manager.close()
+
+
+async def test_a_board_without_a_rate_keeps_the_desktop_default(runtime):
+    board = runtime.board
+    board.config["acquire"].pop("rate_hz", None)
+
+    manager = DeviceManager()
+    manager.default_rate_hz = 7.0
+    try:
+        dev = await manager.connect(LoopbackTransport(runtime), start_stream=False)
+        assert dev.stream_rate_hz == 7.0
+    finally:
+        await manager.close()
+
+
+async def test_connecting_reads_the_simulator_table_the_board_already_has(
+    runtime, monkeypatch
+):
+    """A stored sweep belongs to the board, so connecting has to ask for it.
+
+    SIM_CAL is only pushed unsolicited when a sweep finishes. A board calibrated
+    last week therefore showed the panel an empty table and an unknown state
+    until someone ran another sweep -- the board knew, and nothing asked.
+    """
+    from tjiptemp.device.link import Link
+
+    monkeypatch.setattr(Device, "has_simulator", property(lambda self: True))
+    asked = 0
+
+    async def fake_get_sim_cal(self):
+        nonlocal asked
+        asked += 1
+        return {"generation": 3, "last_sweep": {"ok": True, "verify": []}}
+
+    monkeypatch.setattr(Link, "get_sim_cal", fake_get_sim_cal)
+
+    dev = Device()
+    try:
+        await dev.add_transport(LoopbackTransport(runtime), start_stream=False)
+        assert asked == 1
+        assert dev.sim_cal["generation"] == 3
+    finally:
+        await dev.close()
+
+
+async def test_a_board_without_a_simulator_is_not_asked_for_a_table(runtime, monkeypatch):
+    from tjiptemp.device.link import Link
+
+    monkeypatch.setattr(Device, "has_simulator", property(lambda self: False))
+    asked = 0
+
+    async def fake_get_sim_cal(self):
+        nonlocal asked
+        asked += 1
+        return {}
+
+    monkeypatch.setattr(Link, "get_sim_cal", fake_get_sim_cal)
+
+    dev = Device()
+    try:
+        await dev.add_transport(LoopbackTransport(runtime), start_stream=False)
+        assert asked == 0
+    finally:
+        await dev.close()
+

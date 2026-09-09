@@ -18,6 +18,7 @@ recording remains interpretable years later even after the board is recalibrated
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
@@ -158,6 +159,12 @@ class Database:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
+        # Every connection ever handed out, so close() can actually close them.
+        # Writes run on the default executor's threads, so by the end of a
+        # session most connections belong to threads that are not the one
+        # shutting down -- and each holds a WAL read mark until it is closed.
+        self._all: list[sqlite3.Connection] = []
+        self._all_lock = threading.Lock()
         # executescript() commits any open transaction, and PRAGMA journal_mode
         # cannot run inside one at all, so schema setup deliberately stays outside
         # the transaction helper.
@@ -189,6 +196,8 @@ class Database:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys = ON")
             self._local.conn = conn
+            with self._all_lock:
+                self._all.append(conn)
         return conn
 
     @contextmanager
@@ -217,10 +226,18 @@ class Database:
                 conn.execute("COMMIT")
 
     def close(self) -> None:
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            conn.close()
-            self._local.conn = None
+        """Close every connection, from whichever thread opened it.
+
+        sqlite3 objects may only be used on their creating thread, but closing
+        is the one operation that is safe to do from another one, and leaving
+        them open leaves the -wal and -shm files uncheckpointed on exit.
+        """
+        with self._all_lock:
+            conns, self._all = self._all, []
+        for conn in conns:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
+        self._local.conn = None
 
     # ---------------------------------------------------------------- devices
 

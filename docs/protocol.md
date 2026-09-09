@@ -162,10 +162,29 @@ Sent unsolicited on connect, and in response to `HELLO`.
     {"id": 11, "key": "aht20_t",    "name": "AHT20 temp",      "unit": "degC", "kind": "hygro"},
     {"id": 12, "key": "aht20_rh",   "name": "AHT20 RH",        "unit": "%RH",  "kind": "hygro"},
     {"id": 13, "key": "pt1000_r",   "name": "PT1000 raw",      "unit": "ohm",  "kind": "raw"},
-    {"id": 14, "key": "typek_uv",   "name": "Type K raw",      "unit": "uV",   "kind": "raw"}
+    {"id": 14, "key": "typek_uv",   "name": "Type K raw",      "unit": "uV",   "kind": "raw"},
+    {"id": 15, "key": "ntc_ext4",   "name": "NTC CN4",         "unit": "degC", "kind": "ntc"},
+    {"id": 16, "key": "sim_setpoint","name": "Sim setpoint",   "unit": "degC", "kind": "sim"},
+    {"id": 17, "key": "sim_actual", "name": "Sim output",      "unit": "degC", "kind": "sim"},
+    {"id": 18, "key": "sim_r",      "name": "Sim output raw",  "unit": "ohm",  "kind": "raw"}
   ]
 }
 ```
+
+Ids 15–18 exist on devices with a PT1000 simulator output (§14). No device is
+expected to carry every channel in this table: the `tjiptemp-s3` has a battery,
+a humidity sensor and three external thermistors, while the `tjiptemp-din6` has
+a fourth thermistor, a simulator, and none of those three.
+
+A device that emulates an output adds to `caps`:
+
+```json
+"sim": {"pt1000_out": true, "codes": 256, "dither": true, "needs_loopback": true},
+"display_pages": ["overview", "single", "graph", "sim", "blank"]
+```
+
+`display_pages` is what §10 will actually accept; a host SHOULD offer only
+these rather than discovering the rest by collecting `unsupported` errors.
 
 Channel IDs are stable across firmware versions. A host MUST key on `id`, and MAY use
 `key`/`name` for display. A device that omits a channel simply does not list it.
@@ -220,6 +239,15 @@ persisted to NVS unless `"volatile": true` is included in the patch.
     "rate_hz": 10,              // internal acquisition rate, independent of streaming
     "ring_seconds": 600,        // how much history to retain on-board
     "autostart": true           // acquire even with no host connected
+  },
+  "sim": {                      // only on devices with caps.sim (§14)
+    "enabled": true,
+    "source": 1,                // channel id driving the output, null = parked
+    "tau_s": 4.0,               // first-order lag, seconds
+    "dither": false,            // sigma-delta between adjacent wiper codes
+    "dither_hz": 30,
+    "limits": {"min_c": -50.0, "max_c": 240.0},
+    "drift_warn_c": 3.0         // board-temperature drift before the table is stale
   },
   "display": {"page": "overview", "source": 0, "backlight": 80, "rotation": 0, "timeout_s": 0},
   "net": {"hostname": "tjiptemp-5b44", "mdns": true, "tcp_port": 3737},
@@ -419,9 +447,29 @@ Emitted every 1 s while any host is connected, and immediately on any flag chang
   "ble": {"state": "advertising", "peers": 0},
   "cal_rev": 7,
   "faults": {"max31865": null, "max31856": null, "aht20": null},
+  "sim": {                      // only on devices with caps.sim (§14)
+    "state": "active",          // see §14.1
+    "source": 1,
+    "setpoint_c": 142.3,        // post-filter, what the device asked for
+    "output_c": 142.1,          // what its measured table says it presents
+    "output_r": 1546.2,
+    "wiper": 47,
+    "dither": false,
+    "cal_rev": 3,
+    "cal_ntc_rtd_c": 28.4,      // board temperature when the table was measured
+    "ntc_rtd_c": 30.1,          // board temperature now
+    "drift_c": 1.7,
+    "cal_progress": null        // 0-255 while sweeping
+  },
   "flags": ["uncalibrated"]
 }
 ```
+
+Flags a simulator adds: `sim_uncalibrated`, `sim_cal_stale`, `sim_source_fault`.
+`cj_deviation` means the thermocouple's internal cold junction and a board
+thermistor beside the terminal block disagree by more than the configured
+margin — one of them is wrong and the device does not guess which, so neither
+reading is adjusted.
 
 `faults.max31865` / `.max31856`, when non-null, carry the decoded fault register:
 e.g. `{"reg": 4, "bits": ["rtd_low_threshold"]}`. Hosts should surface these verbatim —
@@ -529,3 +577,77 @@ The host treats 3 missed `STATUS` messages as a dead link and reconnects.
 `proto` it does not implement MUST refuse to stream and MUST say so plainly rather than
 guessing. Minor additions (new message IDs, new JSON keys, new channels) do not bump
 `proto`; ignoring what you do not recognise is always the correct behaviour.
+
+---
+
+## 14. Emulated outputs — the PT1000 simulator
+
+A device MAY present a resistance to third-party equipment that expects an RTD,
+driven from a channel it measures. `caps.sim.pt1000_out` announces it; a device
+without it MUST answer `ERROR{"code":"unsupported"}` to everything in this
+section, and a host MUST NOT offer the controls.
+
+The output is deliberately lagged (`sim.tau_s`, first-order). The point is not
+smoothing: a thermocouple responds in well under a second and the PT1000 it is
+impersonating does not, so feeding a plate's controller an unlagged
+thermocouple gives it a step response its loop was never tuned against. A
+first-order lag is what a real RTD in a sheath does; a moving average is not,
+because it passes a step through delayed but intact.
+
+### 14.1 States
+
+| `state` | Output |
+|---|---|
+| `uncalibrated` | Failsafe — no wiper table |
+| `cal_stale` | **Driving**, with the table flagged as aged |
+| `calibrating` | Sweeping |
+| `idle` | Failsafe — no source selected, or disabled |
+| `active` | Driving |
+| `source_fault` | Failsafe — the source channel faulted |
+
+`cal_stale` deliberately keeps driving. Cutting a running plate's sensor out
+from under it is worse than a table that has aged a couple of degrees, so the
+device reports and continues.
+
+The failsafe is a resistance far below any valid value for the emulated sensor,
+so the equipment downstream reads a shorted probe and refuses to heat. It MUST
+be the resting state of every non-driving state, and of reset.
+
+### 14.2 Calibration
+
+The wiper table is **measured by the device against its own converter**, which
+is why it is not part of the §7 CAL object — that one is built on "the host
+fits, the device evaluates", and this inverts it. A digital potentiometer is a
+±20% part with its own wiper resistance and a tempco of hundreds of ppm/°C, so
+its absolute value is not knowable from a datasheet to anything like the
+accuracy needed.
+
+Measuring it requires the emulated output to be wired back to the device's own
+RTD input, since there is one converter and it normally watches a probe. The
+device MUST verify this rather than trust it — moving the wiper must move the
+reading — and MUST answer `ERROR{"code":"loopback_absent"}` when it does not.
+A sweep taken without the loop records whatever probe is on the input.
+
+`SIM_CALIBRATE` MAY carry `{"utc": <unix seconds>}`; the device has no clock and
+stores it with the table. It is answered immediately with `{"started": true}`,
+reports progress in `STATUS.sim.cal_progress`, and emits `SIM_CAL` on
+completion — **to every session**, because another host needs to know the table
+moved underneath it. `GET_SIM_CAL` returns the same object on demand.
+
+```json
+{
+  "valid": true, "rev": 3, "updated_utc": 1767225600,
+  "ntc_rtd_c": 28.4, "n_usable": 214, "r_min": 105.5, "r_max": 1904.2,
+  "ohms": [1904.2, 1898.1, null, 1886.0, "... one entry per code, null = unusable"],
+  "last_sweep": {
+    "ok": true, "elapsed_ms": 15021,
+    "verify": [{"target_c": 0.0, "actual_c": 0.31}]
+  }
+}
+```
+
+The board temperature at sweep time is what makes the table falsifiable later:
+the potentiometer's resistance moves with temperature, so a table is only valid
+near where it was measured. A device that cannot read it MUST send
+`ntc_rtd_c: null` rather than a guess, and a host SHOULD say plainly that drift
+detection is disabled.

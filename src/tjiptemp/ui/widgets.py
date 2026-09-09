@@ -294,17 +294,6 @@ class ChannelTable(QTableWidget):
             box.setChecked(cid in channel_ids)
             box.blockSignals(False)
 
-    def checked_channels(self) -> list[int]:
-        return [spec.id for spec in self._specs
-                if self._boxes.get(spec.id) is not None and self._boxes[spec.id].isChecked()]
-
-    def selected_channel(self) -> int | None:
-        row = self.currentRow()
-        if 0 <= row < len(self._specs):
-            return self._specs[row].id
-        return None
-
-
 class MetricLabel(QWidget):
     """A caption above a value. Used for the small status readouts."""
 
@@ -335,20 +324,57 @@ class MetricLabel(QWidget):
             self.setToolTip(tooltip)
 
 
+def alive(widget) -> bool:
+    """Whether a widget's underlying C++ object still exists.
+
+    A coroutine started from a dialog keeps running after the dialog is closed:
+    the ``await`` returns, and the continuation then writes to labels whose C++
+    half Qt has already destroyed, raising ``RuntimeError: Internal C++ object
+    already deleted`` from somewhere with no useful traceback. Every UI callback
+    that touches widgets after an ``await`` checks this first.
+    """
+    try:
+        from shiboken6 import isValid
+    except ImportError:      # pragma: no cover - PySide6 always ships shiboken
+        return True
+    try:
+        return bool(isValid(widget))
+    except (RuntimeError, TypeError):
+        return False
+
+
+def message_later(kind: str, parent, title: str, text: str) -> None:
+    """Show a modal message box *after* the current coroutine yields.
+
+    Opening one directly from inside an ``async def`` deadlocks the two event
+    loops against each other: ``QMessageBox.exec`` spins a nested Qt loop,
+    qasync pumps asyncio from inside it, and asyncio then tries to resume some
+    other task while the calling task is still marked as running —
+
+        RuntimeError: Cannot enter into task <...> while another task
+        <...> is being executed
+
+    A zero-delay timer defers the dialog to a later turn of the Qt loop, by
+    which time the coroutine has finished and there is no task to re-enter.
+    Every modal shown from a coroutine must go through here.
+    """
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QMessageBox
+
+    show = {
+        "critical": QMessageBox.critical,
+        "warning": QMessageBox.warning,
+        "information": QMessageBox.information,
+    }[kind]
+    QTimer.singleShot(0, lambda: show(parent, title, text))
+
+
 def humanise_duration(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.0f}s"
     if seconds < 3600:
         return f"{seconds / 60:.0f}m {seconds % 60:.0f}s"
     return f"{seconds / 3600:.0f}h {(seconds % 3600) / 60:.0f}m"
-
-
-def humanise_bytes(count: int) -> str:
-    for unit in ("B", "kB", "MB", "GB"):
-        if count < 1024 or unit == "GB":
-            return f"{count:.0f} {unit}" if unit == "B" else f"{count:.1f} {unit}"
-        count /= 1024.0
-    return f"{count:.1f} GB"
 
 
 def format_utc(t: float) -> str:

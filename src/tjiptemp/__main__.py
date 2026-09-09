@@ -45,8 +45,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-host", default=None)
     parser.add_argument("--api-port", type=int, default=None)
     parser.add_argument("--no-api", action="store_true", help="do not start the API server")
+    parser.add_argument("--broadcast", action="store_true",
+                        help="publish a channel as a network thermometer "
+                             "(VNA Studio and anything else speaking that protocol)")
+    parser.add_argument("--no-broadcast", action="store_true",
+                        help="do not publish the thermometer, whatever the settings say")
+    parser.add_argument("--broadcast-port", type=int, default=None, metavar="PORT")
+    parser.add_argument("--broadcast-channel", type=int, default=None, metavar="ID",
+                        help="channel id to publish, or -1 to pick the best probe")
+    parser.add_argument("--broadcast-name", default=None, metavar="NAME",
+                        help="name shown in the client's device list")
     parser.add_argument("--rate", type=float, default=None, metavar="HZ",
-                        help="stream rate to request from each board")
+                        help="override each board's own sample rate (without this, "
+                             "the rate stored on the board is used)")
+    parser.add_argument("--auto-connect", action="store_true",
+                        help="scan USB and connect to every board that answers "
+                             "(off by default, whatever the settings say)")
     parser.add_argument("-v", "--verbose", action="count", default=0)
     return parser
 
@@ -78,6 +92,18 @@ def apply_overrides(settings, args) -> None:
         settings.api_enabled = False
     if args.rate:
         settings.stream_rate_hz = args.rate
+    if args.auto_connect:
+        settings.auto_connect_usb = True
+    if args.broadcast:
+        settings.broadcast_enabled = True
+    if args.no_broadcast:
+        settings.broadcast_enabled = False
+    if args.broadcast_port:
+        settings.broadcast_port = args.broadcast_port
+    if args.broadcast_channel is not None:
+        settings.broadcast_channel = args.broadcast_channel
+    if args.broadcast_name:
+        settings.broadcast_name = args.broadcast_name
 
 
 async def run_list() -> int:
@@ -123,8 +149,19 @@ async def run_headless(args) -> int:
 
         if not devices:
             print("No boards connected.", file=sys.stderr)
+            if not targets and not settings.auto_connect_usb:
+                print("Nothing was tried: pass --connect ADDRESS, or --auto-connect "
+                      "to scan USB. Use --list to see what is there.", file=sys.stderr)
         for device in devices:
             print(f"connected: {device.label} over {', '.join(device.link_kinds)}")
+
+        # Connecting adopts each board's stored rate. --rate is the one thing
+        # that overrides it, because it was typed on purpose.
+        if args.rate:
+            for device in devices:
+                with contextlib.suppress(Exception):
+                    await device.set_config({"acquire": {"rate_hz": args.rate}})
+                    await device.start_streaming(args.rate)
 
         if args.record:
             for device in devices:
@@ -137,6 +174,13 @@ async def run_headless(args) -> int:
         url = await app.start_api()
         if url:
             print(f"API on {url}  ·  docs at {url}/docs")
+        try:
+            thermo = await app.start_broadcast()
+        except Exception as exc:
+            print(f"thermometer broadcast did not start: {exc}", file=sys.stderr)
+        else:
+            if thermo:
+                print(f"Thermometer on {thermo}  ·  discoverable by mDNS and UDP beacon")
         print("Ctrl-C to stop.")
         await stop.wait()
     finally:
@@ -159,6 +203,12 @@ def run_gui(args) -> int:
     apply_overrides(settings, args)
 
     qt_app = QApplication(sys.argv[:1])
+    # We drive the exit ourselves. Qt's own quit sequence does not wait for
+    # anything asynchronous, and the shutdown here is all asynchronous: closing
+    # links, flushing buffered rows to the database, stopping the API server.
+    # Letting the last window closing quit Qt tears the event loop down first
+    # and none of that runs. See the comment on ``session`` below.
+    qt_app.setQuitOnLastWindowClosed(False)
     qt_app.setApplicationName(APP_NAME)
     qt_app.setApplicationDisplayName(APP_NAME)
     qt_app.setOrganizationName(APP_NAME)
@@ -185,6 +235,12 @@ def run_gui(args) -> int:
         except Exception as exc:
             window.statusBar().showMessage(f"API server did not start: {exc}", 8000)
 
+        try:
+            await app.start_broadcast()
+        except Exception as exc:
+            window.statusBar().showMessage(
+                f"Thermometer broadcast did not start: {exc}", 8000)
+
         for target in args.connect:
             with contextlib.suppress(Exception):
                 await app.connect(target)
@@ -192,13 +248,41 @@ def run_gui(args) -> int:
             with contextlib.suppress(Exception):
                 await app.auto_connect()
 
-    shutdown = asyncio.Event()
-    qt_app.aboutToQuit.connect(shutdown.set)
+    async def session() -> None:
+        """Run until the window closes, then shut down while the loop is alive.
+
+        The previous arrangement -- wait on ``aboutToQuit``, then call
+        ``app.close()`` -- could not work: ``aboutToQuit`` fires *during* Qt's
+        teardown, so by the time the waiter woke, ``QApplication.exec`` had
+        already returned and qasync's loop had stopped. ``run_until_complete``
+        raised "Event loop stopped before Future completed" and ``app.close()``
+        never ran at all, which lost buffered recording rows, left the serial
+        port open with the board still streaming, and silently discarded any
+        settings changed during the session.
+
+        Here the close is just another step in a coroutine on a running loop.
+        """
+        boot = asyncio.ensure_future(startup())
+        try:
+            await window.closed.wait()
+        finally:
+            boot.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await boot
+            await app.close()
+
+    # Ctrl-C would otherwise kill the process between a flush and its commit.
+    # It sets the event directly rather than calling window.close(): a close
+    # event can raise the "recordings in progress" prompt, and opening a modal
+    # from an event-loop callback is the nested-loop deadlock that
+    # ui.widgets.message_later exists to avoid. Shutting down is the answer to
+    # Ctrl-C anyway, and app.close() stops the recordings cleanly on the way.
+    with contextlib.suppress(NotImplementedError, AttributeError, RuntimeError):
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, window.closed.set)
 
     with loop:
-        loop.create_task(startup())
-        loop.run_until_complete(shutdown.wait())
-        loop.run_until_complete(app.close())
+        loop.run_until_complete(session())
     return 0
 
 

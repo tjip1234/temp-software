@@ -273,11 +273,3 @@ class LoopbackTransport(Transport):
             self._session_id = None
 
 
-async def make_loopback(
-    board: SimulatedBoard | None = None, **kwargs
-) -> tuple[LoopbackTransport, SimulatorRuntime]:
-    """Convenience for tests: a running simulator and a transport into it."""
-    board = board or SimulatedBoard(**kwargs)
-    runtime = SimulatorRuntime(board)
-    await runtime.start()
-    return LoopbackTransport(runtime), runtime

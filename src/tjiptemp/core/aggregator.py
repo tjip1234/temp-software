@@ -285,21 +285,3 @@ class SampleAggregator:
         }
 
 
-def blocks_to_frame(blocks: list[SampleBlock], channel_ids: tuple[int, ...]) -> np.ndarray:
-    """Stack blocks into one ``(rows, len(channel_ids))`` array, NaN-filling absences.
-
-    Blocks from different firmware states can carry different channel subsets, so
-    this reindexes rather than assuming the columns line up.
-    """
-    if not blocks:
-        return np.zeros((0, len(channel_ids)), dtype=np.float32)
-    total = sum(b.n_samples for b in blocks)
-    out = np.full((total, len(channel_ids)), np.nan, dtype=np.float32)
-    row = 0
-    for block in blocks:
-        n = block.n_samples
-        for col, cid in enumerate(channel_ids):
-            if cid in block.channel_ids:
-                out[row : row + n, col] = block.data[:, block.channel_ids.index(cid)]
-        row += n
-    return out

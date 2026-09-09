@@ -39,14 +39,36 @@ from ..protocol import messages as M
 from ..protocol.channels import ChannelSpec, specs_from_device_info
 from ..protocol.framing import Frame
 from ..transport.base import Transport, TransportError
+from ..transport.discovery import Candidate, build_transport
 from .link import Link, LinkClosed
 
 log = logging.getLogger(__name__)
 
 #: How long without a STATUS before a link is presumed dead.
-STATUS_TIMEOUT_S = 5.0
+#:
+#: The board sends one per second, so three missed is the spec's rule of thumb
+#: (§12). Over WiFi that is too tight: a board doing something long and
+#: uninterruptible — a wiper sweep is fifteen seconds — is not dead, and
+#: declaring it so tears down a link that was about to come back.
+STATUS_TIMEOUT_S = 20.0
 #: Live buffer depth, in samples. 120k at 100 Hz is 20 minutes.
 LIVE_CAPACITY = 120_000
+
+#: How long to keep re-attempting a handshake, and how long to wait between.
+#:
+#: Connecting is not one event. A board can accept the TCP connection and then
+#: go away before it answers HELLO — it is listening, and then it reboots, and
+#: the socket dies mid-handshake. Retrying the whole cycle (fresh link, fresh
+#: HELLO) covers that, where retrying only the connect does not.
+#:
+#: Only a link that *died* is retried. A board that answers with the wrong
+#: protocol version, or refuses, has given a real answer and gets reported.
+#: How long to keep asking a newly opened link to identify itself. A board that
+#: is simply booting answers within a second or two; this used to be far longer
+#: only because each retry reopened the port and reset the board, so the window
+#: had to outlast a loop it was itself feeding.
+HANDSHAKE_WINDOW_S = 12.0
+HANDSHAKE_RETRY_S = 1.5
 
 
 class DeviceState(Enum):
@@ -80,6 +102,10 @@ class Device:
         self.calibration = CalibrationSet()
         self.status: dict = {}
         self.self_test_result: dict = {}
+        #: Last SIM_CAL from the board: the measured wiper table and the
+        #: residuals of the sweep that produced it. Empty on a board with no
+        #: simulator, which is how the UI decides whether to offer the panel.
+        self.sim_cal: dict = {}
 
         self.channels: dict[int, ChannelSpec] = {}
         self.channel_order: tuple[int, ...] = ()
@@ -152,23 +178,51 @@ class Device:
 
     async def add_transport(self, transport: Transport, *, start_stream: bool = True) -> Link:
         """Attach a transport, handshake over it, and fold it into the sample stream."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + HANDSHAKE_WINDOW_S
+        attempt = 0
+
         link = Link(transport, on_unsolicited=self._on_unsolicited)
         key = link.key
         if key in self.links:
             await self.remove_link(key)
         self.links[key] = link
-        if not self.links or self.state is DeviceState.OFFLINE:
+        if self.state is DeviceState.OFFLINE:
             self._set_state(DeviceState.CONNECTING)
-        try:
-            await link.start()
-            await self._handshake(link)
-        except (TransportError, LinkClosed, TimeoutError, M.DeviceError, M.ProtocolError) as exc:
-            self.links.pop(key, None)
-            with contextlib.suppress(Exception):
-                await link.stop()
-            if not self.links:
-                self._set_state(DeviceState.OFFLINE, str(exc))
-            raise
+
+        while True:
+            attempt += 1
+            try:
+                # Only open when there is nothing open. Opening a USB CDC port
+                # moves the modem lines, and on an ESP32-S3 that is enough to
+                # reset the board -- so reopening once per retry turned "this
+                # board is slow to answer" into "this board is reset every two
+                # seconds and never gets far enough to answer". A board that is
+                # merely quiet gets asked again on the link that is already up.
+                if not transport.is_open:
+                    await link.start()
+                await self._handshake(link)
+                break
+            except (TransportError, LinkClosed, TimeoutError,
+                    M.DeviceError, M.ProtocolError) as exc:
+                # A wrong protocol version or a rejected request is an answer,
+                # not a failure to reach the board. Retrying cannot change it.
+                fatal = isinstance(exc, (M.DeviceError, M.ProtocolError))
+                if fatal or loop.time() >= deadline:
+                    self.links.pop(key, None)
+                    with contextlib.suppress(Exception):
+                        await link.stop()
+                    if not self.links:
+                        self._set_state(
+                            DeviceState.OFFLINE,
+                            str(exc) if fatal else
+                            f"{exc} (gave up after {attempt} attempts in "
+                            f"{HANDSHAKE_WINDOW_S:.0f} s)",
+                        )
+                    raise
+                log.info("%s: handshake attempt %d failed (%s); retrying",
+                         self.label, attempt, exc)
+                await asyncio.sleep(HANDSHAKE_RETRY_S)
 
         self._spawn(self._watch_link(link))
         if start_stream and self._streaming:
@@ -224,10 +278,22 @@ class Device:
 
         with contextlib.suppress(M.DeviceError, TimeoutError):
             self.config = await link.get_config()
+            self._adopt_board_settings()
             self._emit("config", config=self.config)
         with contextlib.suppress(M.DeviceError, TimeoutError):
             self.calibration = CalibrationSet.from_json(await link.get_cal())
             self._emit("cal", calibration=self.calibration)
+
+        # The board keeps its simulator sweep in NVS and only pushes SIM_CAL
+        # unsolicited when a new sweep finishes. Without asking for it here, a
+        # board that was calibrated last week showed the panel an empty table
+        # and an unknown state until someone ran another sweep -- the board knew,
+        # and the desktop never asked.
+        if self.has_simulator:
+            with contextlib.suppress(M.DeviceError, TimeoutError, LinkClosed,
+                                     TransportError):
+                self.sim_cal = await link.get_sim_cal()
+                self._emit("sim_cal", table=self.sim_cal)
 
     def _apply_info(self, info: dict) -> None:
         self.info = info
@@ -238,6 +304,28 @@ class Device:
         if not self.name:
             self.name = info.get("model", "TjipTemp")
         self._emit("info", info=info)
+
+    def _adopt_board_settings(self) -> None:
+        """On connect, the board's stored settings win.
+
+        The board keeps its configuration in NVS and applies it the moment it
+        powers up, host or no host -- that is the whole point of a DIN-rail box
+        in a cabinet. If this software pushed its own remembered values over the
+        top on connect, whatever was set at the board would be overwritten by a
+        program that just walked in, and the panel would change the instant
+        someone plugged a laptop in.
+
+        So connecting is one-way: board -> desktop. The desktop's own value is a
+        fallback for a board that does not report one, and changing a setting
+        afterwards is an explicit push the user asked for.
+        """
+        rate = (self.config.get("acquire") or {}).get("rate_hz")
+        if isinstance(rate, (int, float)) and rate > 0:
+            self._stream_rate_hz = min(float(rate), self.max_rate_hz)
+
+    @property
+    def stream_rate_hz(self) -> float:
+        return self._stream_rate_hz
 
     @property
     def label(self) -> str:
@@ -320,6 +408,12 @@ class Device:
             elif frame.msg_type == M.Msg.WIFI_STATUS:
                 self.status["wifi"] = M.parse_json(frame)
                 self._emit("status", status=self.status)
+            elif frame.msg_type == M.Msg.SIM_CAL:
+                # Broadcast to every session when a sweep finishes, not only to
+                # whoever asked — another host watching this board needs to know
+                # its wiper table moved underneath it.
+                self.sim_cal = M.parse_json(frame)
+                self._emit("sim_cal", table=self.sim_cal)
             elif frame.msg_type == M.Msg.ERROR:
                 err = M.parse_error(frame)
                 log.warning("%s: unsolicited error %s", self.label, err)
@@ -553,6 +647,45 @@ class Device:
             lambda link: link.wifi_provision(ssid, psk), "provision WiFi"
         )
 
+    # ------------------------------------------------------------- simulator
+
+    @property
+    def has_simulator(self) -> bool:
+        """Whether this board emulates a PT1000 output.
+
+        Announced in DEVICE_INFO caps, so the UI never offers the controls to a
+        board that would answer ERROR "unsupported".
+        """
+        return bool(self.info.get("caps", {}).get("sim", {}).get("pt1000_out"))
+
+    @property
+    def sim_status(self) -> dict:
+        return self.status.get("sim") or {}
+
+    async def calibrate_simulator(self) -> dict:
+        """Start a wiper sweep and return the board's acknowledgement.
+
+        Deliberately does not wait for the sweep: it takes ~15 s, and a caller
+        that blocks for that long cannot show the progress the board is
+        reporting meanwhile in STATUS. Watch for the ``sim_cal`` event.
+        """
+        ack = await self._on_primary(
+            lambda link: link.sim_calibrate(time.time()), "calibrate the simulator"
+        )
+        self._emit("sim_cal_started")
+        return ack
+
+    async def refresh_sim_cal(self) -> dict:
+        self.sim_cal = await self._on_primary(
+            lambda link: link.get_sim_cal(), "read the simulator table"
+        )
+        self._emit("sim_cal", table=self.sim_cal)
+        return self.sim_cal
+
+    async def set_sim(self, **fields) -> dict:
+        """Patch the ``sim`` config block. ``source=None`` parks the output."""
+        return await self.set_config({"sim": {k: v for k, v in fields.items()}})
+
     async def set_wire_mode(self, wires: int) -> dict:
         if wires not in (2, 3, 4):
             raise ValueError("PT1000 wire count must be 2, 3 or 4")
@@ -665,6 +798,12 @@ class Device:
         return f"<Device {self.label} {self.state.value} links={len(self.links)}>"
 
 
+#: Backoff between reconnect attempts. The last value repeats forever: a board
+#: powered down overnight should be picked up when it comes back, without a
+#: retry storm in the meantime.
+RECONNECT_DELAYS_S = (2.0, 5.0, 10.0, 20.0, 30.0, 60.0)
+
+
 class DeviceManager:
     """Owns every known device and the reconnect policy.
 
@@ -672,14 +811,100 @@ class DeviceManager:
     different port -- or the board reappearing on WiFi with a new IP -- reattaches
     to the same Device object with its history intact, rather than spawning a
     duplicate.
+
+    When a link dies on its own -- WiFi dropped, cable pulled, board rebooted --
+    and it was the device's last one, the address it was reached on is retried
+    with a backoff until it answers again. A link the user closed is not retried:
+    that was an instruction, not a failure.
     """
 
     def __init__(self) -> None:
         self.devices: dict[str, Device] = {}
         self._listeners: list[Callable[[DeviceEvent], None]] = []
+        #: Used only for a board whose CONFIG carries no acquire.rate_hz.
+        self.default_rate_hz = 10.0
         self._auto_reconnect = True
         self._reconnect_tasks: dict[str, asyncio.Task] = {}
         self._attempts: dict[str, int] = defaultdict(int)
+        #: Where each device was last reachable, per link key.
+        self._addresses: dict[str, dict[str, Candidate]] = defaultdict(dict)
+        self._closing = False
+
+    @property
+    def auto_reconnect(self) -> bool:
+        return self._auto_reconnect
+
+    @auto_reconnect.setter
+    def auto_reconnect(self, on: bool) -> None:
+        self._auto_reconnect = bool(on)
+        if not on:
+            for task in self._reconnect_tasks.values():
+                task.cancel()
+
+    def _remember_address(self, device: Device, link: Link) -> None:
+        if not device.serial:
+            return
+        self._addresses[device.serial][link.key] = Candidate(
+            kind=link.info.kind,
+            address=link.info.address,
+            label=link.info.label,
+            serial=device.serial or None,
+        )
+
+    def _on_link_event(self, event: DeviceEvent) -> None:
+        """Start a reconnect when a device loses its last link unexpectedly."""
+        if event.kind != "links" or not event.data.get("closed"):
+            return
+        device = event.device
+        if device.links or device._closing or self._closing:
+            return
+        if not self._auto_reconnect or self.devices.get(device.serial) is not device:
+            return
+        self._start_reconnect(device)
+
+    def _start_reconnect(self, device: Device) -> None:
+        serial = device.serial
+        existing = self._reconnect_tasks.get(serial)
+        if existing is not None and not existing.done():
+            return
+        addresses = list(self._addresses.get(serial, {}).values())
+        if not addresses:
+            return
+        task = asyncio.ensure_future(self._reconnect_loop(device, addresses))
+        self._reconnect_tasks[serial] = task
+
+    async def _reconnect_loop(self, device: Device, addresses: list[Candidate]) -> None:
+        serial = device.serial
+        try:
+            while (
+                self._auto_reconnect
+                and not self._closing
+                and not device._closing
+                and not device.links
+                and self.devices.get(serial) is device
+            ):
+                attempt = self._attempts[serial]
+                self._attempts[serial] = attempt + 1
+                delay = RECONNECT_DELAYS_S[min(attempt, len(RECONNECT_DELAYS_S) - 1)]
+                await asyncio.sleep(delay)
+                if device.links or self.devices.get(serial) is not device:
+                    return
+                for candidate in addresses:
+                    try:
+                        link = await device.add_transport(build_transport(candidate))
+                    except Exception as exc:
+                        log.debug("%s: reconnect to %s failed: %s",
+                                  device.label, candidate.address, exc)
+                        continue
+                    self._attempts[serial] = 0
+                    self._remember_address(device, link)
+                    log.info("%s: reconnected over %s", device.label, candidate.address)
+                    self._emit_manager("reconnected", device)
+                    return
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._reconnect_tasks.pop(serial, None)
 
     def subscribe(self, listener: Callable[[DeviceEvent], None]) -> Callable[[], None]:
         self._listeners.append(listener)
@@ -695,6 +920,7 @@ class DeviceManager:
         already be known.
         """
         provisional = Device()
+        provisional._stream_rate_hz = self.default_rate_hz
         for listener in self._listeners:
             provisional.subscribe(listener)
         await provisional.add_transport(transport, start_stream=start_stream)
@@ -712,10 +938,14 @@ class DeviceManager:
             if existing._streaming:
                 await existing._start_stream_on(link)
             existing._set_state(DeviceState.ONLINE)
+            self._remember_address(existing, link)
             existing._emit("links")
             return existing
 
         self.devices[serial] = provisional
+        provisional.subscribe(self._on_link_event)
+        for link in provisional.links.values():
+            self._remember_address(provisional, link)
         self._emit_manager("device_added", provisional)
         return provisional
 
@@ -733,18 +963,36 @@ class DeviceManager:
         return [d for d in self.devices.values() if d.is_online]
 
     async def disconnect(self, serial: str) -> None:
+        # Drop the remembered addresses first: a user-initiated disconnect must
+        # not be undone a couple of seconds later by the reconnect loop.
+        self._addresses.pop(serial, None)
+        self._attempts.pop(serial, None)
+        task = self._reconnect_tasks.pop(serial, None)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         device = self.devices.pop(serial, None)
         if device is not None:
             await device.close()
             self._emit_manager("device_removed", device)
 
     async def close(self) -> None:
-        for task in self._reconnect_tasks.values():
+        self._closing = True
+        tasks = list(self._reconnect_tasks.values())
+        self._reconnect_tasks.clear()
+        for task in tasks:
             task.cancel()
+        if tasks:
+            # Awaiting them is what stops "Task was destroyed but it is pending"
+            # on the way out, and guarantees none is mid-handshake on a
+            # transport we are about to close underneath it.
+            await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.gather(
             *(device.close() for device in self.devices.values()), return_exceptions=True
         )
         self.devices.clear()
+        self._addresses.clear()
 
     def health(self) -> list[dict]:
         return [device.health() for device in self.devices.values()]

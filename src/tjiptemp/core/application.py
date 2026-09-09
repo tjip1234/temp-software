@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -28,6 +29,16 @@ log = logging.getLogger(__name__)
 
 
 def config_dir() -> Path:
+    """Where settings live.
+
+    ``TJIPTEMP_CONFIG_DIR`` overrides it. Without that, anything that builds an
+    Application and closes it -- the test suite, a throwaway script -- writes
+    the real user's settings on the way out, because close() saves them. That
+    is a nasty way to lose a configuration.
+    """
+    override = os.environ.get("TJIPTEMP_CONFIG_DIR")
+    if override:
+        return Path(override)
     return Path(user_config_dir(APP_NAME, appauthor=False))
 
 
@@ -39,12 +50,21 @@ def default_db_path() -> Path:
     return data_dir() / "recordings.tjip"
 
 
+#: Bump when changing a default that existing settings files already record, and
+#: add the corresponding step to ``Settings._migrate``.
+SETTINGS_VERSION = 1
+
+
 @dataclass
 class Settings:
     """User preferences. Stored as JSON next to the database."""
 
     stream_rate_hz: float = 10.0
-    auto_connect_usb: bool = True
+    #: Off by default. Starting the program should not claim hardware: opening a
+    #: serial port takes it away from whatever else is using it, and on an
+    #: ESP32-S3 it moves the modem lines on a board that may be mid-measurement.
+    #: "Find USB boards" in the toolbar does the same scan when it is wanted.
+    auto_connect_usb: bool = False
     auto_reconnect: bool = True
     live_window_s: float = 300.0
     temperature_unit: str = "degC"      # degC | degF | K
@@ -56,24 +76,93 @@ class Settings:
     api_allow_control: bool = True      # allow writes, not just reads
     mdns_discovery: bool = True
     ble_discovery: bool = False
+
+    # --- Network thermometer broadcast (VNA Studio and friends) ------------
+    #: Off by default: it binds a routable address, and nothing should start
+    #: listening on the network because the app was installed.
+    broadcast_enabled: bool = False
+    broadcast_host: str = "0.0.0.0"
+    broadcast_port: int = 8738
+    broadcast_path: str = "/temperature"
+    broadcast_ws_path: str = "/ws"
+    #: Which transport the advertisement recommends: "http" or "websocket".
+    #: Both are always served; this only sets what a discovering client picks.
+    broadcast_mode: str = "http"
+    #: Shown in the client's device list. Blank derives one from the app name.
+    broadcast_name: str = ""
+    #: Which board, by serial. Blank means whichever is online.
+    broadcast_serial: str = ""
+    #: Which channel id, or -1 to pick the best probe the board actually has.
+    broadcast_channel: int = -1
+    broadcast_unit: str = "degC"
+    #: WebSocket push period, seconds.
+    broadcast_interval_s: float = 1.0
+    #: Moving-average window in seconds; 0 publishes the instantaneous value.
+    #: A dielectric sweep takes seconds, so a little smoothing is usually right.
+    broadcast_average_s: float = 3.0
+    #: A reading older than this is not published.
+    broadcast_max_age_s: float = 10.0
+    #: What to do when there is nothing fresh: "error" (503) or "last".
+    broadcast_stale_policy: str = "error"
+    broadcast_mdns: bool = True
+    broadcast_beacon: bool = True
+    #: Beacon period. The client only listens during a scan a few seconds long,
+    #: so this has to be comfortably shorter than that to be caught.
+    broadcast_beacon_interval_s: float = 2.0
     db_path: str = ""
     recent_addresses: list[str] = field(default_factory=list)
+    #: Bumped when a default changes in a way a stored file would otherwise
+    #: keep overriding. See ``_migrate``.
+    settings_version: int = SETTINGS_VERSION
 
     @classmethod
     def load(cls, path: Path | None = None) -> Settings:
         path = path or (config_dir() / "settings.json")
         if not path.exists():
-            return cls()
+            settings = cls()
+            settings._path = path
+            return settings
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             log.warning("could not read %s (%s); using defaults", path, exc)
-            return cls()
+            settings = cls()
+            settings._path = path
+            return settings
         known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        settings = cls(**{k: v for k, v in raw.items() if k in known})
+        settings._migrate(int(raw.get("settings_version", 0)))
+        settings._path = path
+        return settings
+
+    def _migrate(self, was: int) -> None:
+        """Apply default changes that a stored file would otherwise override.
+
+        Every field is written out on save, so simply changing a default in this
+        class does nothing for anyone who already has a settings file -- the old
+        value is in it, and it wins. A default worth changing is usually one that
+        was wrong for everybody, so it has to be applied once to the files that
+        already exist as well.
+        """
+        if was < 1:
+            # Auto-connect used to be on. Starting the program should not claim
+            # hardware: opening a serial port takes it from whatever else has it,
+            # and on an ESP32-S3 it moves the modem lines on a board that may be
+            # mid-measurement. "Find USB boards" does the same scan on request.
+            self.auto_connect_usb = False
+        self.settings_version = SETTINGS_VERSION
 
     def save(self, path: Path | None = None) -> None:
-        path = path or (config_dir() / "settings.json")
+        """Write back to wherever these were loaded from.
+
+        Settings built in code rather than loaded -- a test, a script -- have no
+        origin, and writing them to the real config path would overwrite a
+        configuration nobody asked to change. Those are dropped instead.
+        """
+        path = path or getattr(self, "_path", None)
+        if path is None:
+            return
+        path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
 
@@ -94,9 +183,12 @@ class Application:
         path = db_path or Path(self.settings.db_path or default_db_path())
         self.db = Database(path)
         self.devices = DeviceManager()
+        self.devices.auto_reconnect = self.settings.auto_reconnect
         self.recorder = Recorder(self.db)
         self._api_server = None
         self._api_task: asyncio.Task | None = None
+        from ..api.broadcast import TemperatureBroadcast
+        self.broadcast = TemperatureBroadcast(self)
         self._listeners: list[Callable[[DeviceEvent], None]] = []
         self.devices.subscribe(self._on_device_event)
 
@@ -133,8 +225,14 @@ class Application:
         candidate = target if isinstance(target, Candidate) else parse_address(target)
         if candidate is None:
             raise ValueError(f"could not interpret {target!r} as a device address")
+        # The rate is a fallback, not an instruction: Device._adopt_board_settings
+        # replaces it with the board's own acquire.rate_hz during the handshake,
+        # and streaming then starts at whatever the board was already set to.
+        self.devices.default_rate_hz = self.settings.stream_rate_hz
         device = await self.devices.connect(build_transport(candidate))
-        await device.start_streaming(self.settings.stream_rate_hz)
+        # Mirror it back so the UI and the next connect show what the board says,
+        # rather than a preference the board has already overruled.
+        self.settings.stream_rate_hz = device.stream_rate_hz
         self.settings.remember_address(candidate.address)
         return device
 
@@ -195,6 +293,18 @@ class Application:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.wait_for(task, timeout=5.0)
 
+    # ------------------------------------------------- thermometer broadcast
+
+    async def start_broadcast(self) -> str | None:
+        """Publish a channel as a network thermometer. None if disabled."""
+        return await self.broadcast.start()
+
+    async def stop_broadcast(self) -> None:
+        await self.broadcast.stop()
+
+    async def restart_broadcast(self) -> str | None:
+        return await self.broadcast.restart()
+
     @property
     def api_url(self) -> str:
         return f"http://{self.settings.api_host}:{self.settings.api_port}"
@@ -206,6 +316,8 @@ class Application:
     # ---------------------------------------------------------------- shutdown
 
     async def close(self) -> None:
+        with contextlib.suppress(Exception):
+            await self.stop_broadcast()
         await self.stop_api()
         with contextlib.suppress(Exception):
             await self.recorder.stop_all()
@@ -221,4 +333,5 @@ class Application:
             "recordings": self.recorder.status(),
             "database": self.db.stats(),
             "api": {"running": self.api_running, "url": self.api_url if self.api_running else None},
+            "broadcast": self.broadcast.status(),
         }

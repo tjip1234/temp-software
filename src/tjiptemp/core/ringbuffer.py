@@ -32,6 +32,7 @@ class ChannelRing:
         self._seq = np.zeros(self.capacity * 2, dtype=np.int64)
         self._cursor = 0     # next write index in [0, capacity)
         self._count = 0      # total rows ever written
+        self._generation = 0
 
     # ------------------------------------------------------------------ write
 
@@ -62,6 +63,7 @@ class ChannelRing:
             self._write(0, times_s[split:], values[split:], None if seqs is None else seqs[split:])
         self._cursor = end % self.capacity
         self._count += n
+        self._generation += 1
 
     def _write(self, at: int, times_s, values, seqs) -> None:
         n = len(times_s)
@@ -74,6 +76,11 @@ class ChannelRing:
             self._seq[at + self.capacity : at + self.capacity + n] = seqs
 
     # ------------------------------------------------------------------- read
+
+    @property
+    def generation(self) -> int:
+        """Monotonic counter incremented on every append."""
+        return self._generation
 
     @property
     def size(self) -> int:
@@ -95,10 +102,6 @@ class ChannelRing:
             return self._t[start : start + n], self._v[start : start + n]
         return self._t[start:], self._v[start:]  # pragma: no cover - unreachable
 
-    def channel_view(self, index: int, last_n: int | None = None) -> tuple[np.ndarray, np.ndarray]:
-        t, v = self.view(last_n)
-        return t, v[:, index]
-
     def window(self, seconds: float, now_s: float | None = None) -> tuple[np.ndarray, np.ndarray]:
         """Rows within the last ``seconds``, by timestamp rather than by count."""
         t, v = self.view()
@@ -115,29 +118,10 @@ class ChannelRing:
         i = (self._cursor - 1) % self.capacity
         return float(self._t[i]), self._v[i]
 
-    def latest_valid(self, index: int, max_age_rows: int = 200) -> float:
-        """Most recent non-NaN value for a channel, searching back a bounded distance.
-
-        A faulted sensor emits NaN; showing the last good reading with an age is far
-        more useful to a user than showing a dash, but only up to a point -- hence
-        the bound.
-        """
-        t, v = self.view(max_age_rows)
-        if v.size == 0:
-            return float("nan")
-        col = v[:, index]
-        good = np.flatnonzero(np.isfinite(col))
-        return float(col[good[-1]]) if good.size else float("nan")
-
-    def time_span(self) -> tuple[float, float]:
-        t, _ = self.view()
-        if t.size == 0:
-            return (0.0, 0.0)
-        return (float(t[0]), float(t[-1]))
-
     def clear(self) -> None:
         self._cursor = 0
         self._count = 0
+        self._generation += 1
         self._v[:] = np.nan
 
     def resize(self, capacity: int) -> None:

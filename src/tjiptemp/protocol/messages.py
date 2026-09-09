@@ -50,6 +50,12 @@ class Msg:
     LED_SET = 0x61
     IDENTIFY = 0x62
 
+    # DIN-6 simulator control. Spec §13: new message ids do not bump `proto`,
+    # and a device that does not implement them answers ERROR "unsupported".
+    SIM_CALIBRATE = 0x68
+    GET_SIM_CAL = 0x69
+    SIM_CAL = 0x6A
+
     SELF_TEST = 0x70
     SELF_TEST_RESULT = 0x71
 
@@ -66,7 +72,11 @@ MSG_NAMES: dict[int, str] = {
 }
 
 #: Messages the device sends without being asked. These never carry a seq.
-UNSOLICITED = frozenset({Msg.SAMPLE_BLOCK, Msg.STATUS, Msg.LOG, Msg.DEVICE_INFO, Msg.WIFI_STATUS})
+#: SIM_CAL is here because a finished sweep is broadcast to every session, not
+#: only to whoever asked for it — another host watching the board needs to know
+#: its wiper table changed underneath it.
+UNSOLICITED = frozenset({Msg.SAMPLE_BLOCK, Msg.STATUS, Msg.LOG, Msg.DEVICE_INFO,
+                         Msg.WIFI_STATUS, Msg.SIM_CAL})
 
 #: For each request, the message type that answers it.
 RESPONSE_FOR: dict[int, int] = {
@@ -79,6 +89,10 @@ RESPONSE_FOR: dict[int, int] = {
     Msg.GET_RANGE: Msg.RANGE_END,
     Msg.SELF_TEST: Msg.SELF_TEST_RESULT,
     Msg.WIFI_PROVISION: Msg.WIFI_STATUS,
+    Msg.GET_SIM_CAL: Msg.SIM_CAL,
+    # SIM_CALIBRATE answers with itself: an immediate acknowledgement that the
+    # sweep started. The table arrives later, unsolicited.
+    Msg.SIM_CALIBRATE: Msg.SIM_CALIBRATE,
 }
 
 PROTOCOL_VERSION = 1
@@ -372,6 +386,23 @@ def identify(seconds: float = 5.0) -> Frame:
 
 def self_test() -> Frame:
     return Frame(Msg.SELF_TEST)
+
+
+def sim_calibrate(utc: float | None = None) -> Frame:
+    """Start a wiper sweep.
+
+    The board has no clock, so it takes ours to stamp the table it is about to
+    measure. It answers immediately — the sweep runs for ~15 s, reports progress
+    in ``STATUS.sim.cal_progress`` and sends ``SIM_CAL`` when it finishes.
+    """
+    body: dict = {}
+    if utc is not None:
+        body["utc"] = int(utc)
+    return Frame(Msg.SIM_CALIBRATE, json_payload(body))
+
+
+def get_sim_cal() -> Frame:
+    return Frame(Msg.GET_SIM_CAL)
 
 
 def wifi_provision(ssid: str, psk: str) -> Frame:

@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -45,6 +46,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -54,7 +56,7 @@ from ..calibration.models import CalibrationSet, validate
 from ..device.device import Device
 from ..protocol.channels import Ch, ChannelSpec
 from .theme import Theme
-from .widgets import unit_symbol
+from .widgets import message_later, unit_symbol
 
 #: How long to average when capturing a reference point.
 SETTLE_SECONDS = 10.0
@@ -63,6 +65,16 @@ SETTLE_SECONDS = 10.0
 RAW_SOURCE: dict[int, tuple[int, str]] = {
     int(Ch.PT1000): (int(Ch.PT1000_R), "ohm"),
     int(Ch.TYPEK): (int(Ch.TYPEK_UV), "uV"),
+}
+
+#: The one thing you need before capturing: how many points this model wants.
+#: The reasoning behind each lives in HELP, one click away — it is worth
+#: reading once and then never again, which is exactly what a disclosure is for.
+SHORT_HELP = {
+    "cvd": "Fitted against measured resistance. 1 point fits R0, 2–3 add the slope, 4+ add curvature.",
+    "steinhart": "Needs 3 points minimum. 3 fit exactly, so residuals mean nothing; 4+ give a real error estimate.",
+    "nist_typek": "Fitted against measured microvolts. Calibrate the cold junction separately.",
+    "linear": "1 point fits the offset, 2 or more also fit the gain.",
 }
 
 HELP = {
@@ -171,7 +183,7 @@ class CalibrationDialog(QDialog):
         self._capture_task: asyncio.Task | None = None
 
         self.setWindowTitle(f"Calibrate — {device.label}")
-        self.resize(1000, 680)
+        self.resize(900, 600)
 
         root = QVBoxLayout(self)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -207,6 +219,7 @@ class CalibrationDialog(QDialog):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 6, 0)
+        layout.setSpacing(6)
 
         picker = QHBoxLayout()
         picker.addWidget(QLabel("Channel"))
@@ -215,8 +228,27 @@ class CalibrationDialog(QDialog):
         picker.addWidget(self.channel_box, 1)
         layout.addLayout(picker)
 
+        self.short_help = QLabel()
+        self.short_help.setWordWrap(True)
+        self.short_help.setStyleSheet(f"color: {self.theme.text_secondary};")
+        layout.addWidget(self.short_help)
+
+        # The long note is read once per channel type and then never again, so
+        # it does not get to hold four lines of the dialog permanently.
+        self.help_toggle = QToolButton()
+        self.help_toggle.setText("Why these points?")
+        self.help_toggle.setCheckable(True)
+        self.help_toggle.setAutoRaise(True)
+        self.help_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.help_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.help_toggle.toggled.connect(self._toggle_help)
+        layout.addWidget(self.help_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+
         self.help_label = QLabel()
         self.help_label.setWordWrap(True)
+        self.help_label.setVisible(False)
         self.help_label.setStyleSheet(
             f"color: {self.theme.text_secondary}; background: {self.theme.surface_raised};"
             f"border: 1px solid {self.theme.border}; border-radius: 6px; padding: 8px;"
@@ -224,41 +256,42 @@ class CalibrationDialog(QDialog):
         layout.addWidget(self.help_label)
 
         capture = QGroupBox("Capture a reference point")
-        capture_layout = QVBoxLayout(capture)
+        capture_form = QFormLayout(capture)
+        capture_form.setContentsMargins(8, 6, 8, 6)
+        capture_form.setSpacing(6)
 
-        live_row = QHBoxLayout()
         self.live_label = QLabel("—")
         mono = QFont("monospace")
         mono.setStyleHint(QFont.StyleHint.Monospace)
         self.live_label.setFont(mono)
-        live_row.addWidget(QLabel("Live:"))
-        live_row.addWidget(self.live_label, 1)
-        capture_layout.addLayout(live_row)
+        capture_form.addRow("Board reads", self.live_label)
 
+        # Reference value, averaging window and the button on one line: it is
+        # one action, and stacking it over three rows made it look like three.
         entry = QHBoxLayout()
-        entry.addWidget(QLabel("Reference reads"))
+        entry.setSpacing(6)
         self.reference_input = QDoubleSpinBox()
         self.reference_input.setRange(-300.0, 2000.0)
         self.reference_input.setDecimals(4)
         self.reference_input.setValue(0.0)
-        entry.addWidget(self.reference_input)
+        entry.addWidget(self.reference_input, 1)
         self.reference_unit = QLabel("°C")
         entry.addWidget(self.reference_unit)
-        capture_layout.addLayout(entry)
-
-        settle = QHBoxLayout()
-        settle.addWidget(QLabel("Average over"))
+        entry.addSpacing(8)
         self.settle_input = QDoubleSpinBox()
         self.settle_input.setRange(0.5, 300.0)
         self.settle_input.setValue(SETTLE_SECONDS)
-        self.settle_input.setSuffix(" s")
-        settle.addWidget(self.settle_input)
-        settle.addStretch(1)
+        self.settle_input.setSuffix(" s avg")
+        self.settle_input.setToolTip(
+            "How long to average the board's reading while capturing.\n"
+            "Longer beats down noise; too long drifts if the bath is not settled."
+        )
+        entry.addWidget(self.settle_input)
         self.capture_button = QPushButton("Capture")
         self.capture_button.setProperty("primary", True)
         self.capture_button.clicked.connect(self._on_capture)
-        settle.addWidget(self.capture_button)
-        capture_layout.addLayout(settle)
+        entry.addWidget(self.capture_button)
+        capture_form.addRow("Reference reads", entry)
         layout.addWidget(capture)
 
         self.points = PointTable()
@@ -275,6 +308,12 @@ class CalibrationDialog(QDialog):
         layout.addLayout(actions)
         return panel
 
+    def _toggle_help(self, shown: bool) -> None:
+        self.help_label.setVisible(shown)
+        self.help_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if shown else Qt.ArrowType.RightArrow
+        )
+
     def _build_right(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -285,7 +324,7 @@ class CalibrationDialog(QDialog):
         self.residual_plot.setLabel("bottom", "Reference")
         self.residual_plot.showGrid(x=True, y=True, alpha=0.25)
         self.residual_plot.addLine(y=0, pen=pg.mkPen(self.theme.text_muted, width=1))
-        self.residual_plot.setMinimumHeight(200)
+        self.residual_plot.setMinimumHeight(160)
         layout.addWidget(self.residual_plot, 1)
 
         self.quality_label = QLabel("Capture at least one point, then fit.")
@@ -304,17 +343,20 @@ class CalibrationDialog(QDialog):
         )
         layout.addWidget(self.coefficients)
 
-        meta = QGroupBox("Provenance")
-        meta_layout = QVBoxLayout(meta)
+        # Provenance is two fields. It had a group box, a title and its own
+        # vertical layout for that, which is more chrome than content.
+        meta = QFormLayout()
+        meta.setContentsMargins(0, 4, 0, 0)
+        meta.setSpacing(4)
         self.by_input = QLineEdit(self.working.by)
         self.by_input.setPlaceholderText("Who performed this calibration")
         self.reference_note = QLineEdit(self.working.reference)
         self.reference_note.setPlaceholderText(
-            "Reference instrument and its certificate, e.g. Fluke 1524 / 5608, cert 2026-01-12"
+            "e.g. Fluke 1524 / 5608, cert 2026-01-12"
         )
-        meta_layout.addWidget(self.by_input)
-        meta_layout.addWidget(self.reference_note)
-        layout.addWidget(meta)
+        meta.addRow("By", self.by_input)
+        meta.addRow("Against", self.reference_note)
+        layout.addLayout(meta)
         return panel
 
     # -------------------------------------------------------------- channels
@@ -347,7 +389,10 @@ class CalibrationDialog(QDialog):
         if spec is None:
             return
         self.points.clear_points()
-        self.help_label.setText(HELP.get(spec.cal_model or "", ""))
+        model = spec.cal_model or ""
+        self.short_help.setText(SHORT_HELP.get(model, ""))
+        self.help_label.setText(HELP.get(model, ""))
+        self.help_toggle.setVisible(bool(HELP.get(model)))
         self.reference_unit.setText(unit_symbol(spec.unit))
         existing = self.working.get(spec.key)
         self.coefficients.setText(f"Currently on the board:\n  {existing.describe()}")
@@ -400,7 +445,7 @@ class CalibrationDialog(QDialog):
             _t, values = self.device.series(raw_id, seconds)
             good = values[np.isfinite(values)]
             if good.size == 0:
-                QMessageBox.warning(
+                message_later("warning",
                     self, "No usable samples",
                     f"{spec.name} produced no valid readings during the settling "
                     f"window. Check the probe is connected and the channel is not "
@@ -533,7 +578,7 @@ class CalibrationDialog(QDialog):
             )
             await self.device.write_calibration(stamped)
         except Exception as exc:
-            QMessageBox.critical(
+            message_later("critical",
                 self, "Calibration not written",
                 f"The board did not accept the calibration:\n\n{exc}\n\n"
                 f"Nothing was changed."
@@ -541,14 +586,24 @@ class CalibrationDialog(QDialog):
             self.apply_button.setEnabled(True)
             self.apply_button.setText("Write to board")
             return
-        QMessageBox.information(
+        message_later("information",
             self, "Calibration written",
             f"Stored as revision {self.device.calibration.rev}."
         )
         self.accept()
 
-    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+    def _teardown(self) -> None:
         self._live_timer.stop()
         if self._capture_task and not self._capture_task.done():
             self._capture_task.cancel()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._teardown()
         super().closeEvent(event)
+
+    def done(self, result: int) -> None:
+        # Cancel, Esc and accept() all go through done() and none of them
+        # produce a close event, so closeEvent alone left the 400 ms live timer
+        # running on a hidden dialog and a capture coroutine still in flight.
+        self._teardown()
+        super().done(result)

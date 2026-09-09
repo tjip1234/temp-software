@@ -30,12 +30,13 @@ except ImportError as exc:  # pragma: no cover
     BLE_IMPORT_ERROR = str(exc)
 
 
-# Placeholder UUIDs. Assign a real 128-bit base before production hardware ships;
-# the firmware and this constant must agree, and nothing else depends on them.
-SERVICE_UUID = "6f0d0001-b5a3-f393-e0a9-e50e24dcca9e"
-CHAR_RX_UUID = "6f0d0002-b5a3-f393-e0a9-e50e24dcca9e"  # host -> device (write)
-CHAR_TX_UUID = "6f0d0003-b5a3-f393-e0a9-e50e24dcca9e"  # device -> host (notify)
-CHAR_INFO_UUID = "6f0d0004-b5a3-f393-e0a9-e50e24dcca9e"  # static identity (read)
+# The TJIP-1 base, as assigned by the firmware (main/tjip_ble.cpp): "TJIP" in
+# ASCII, then 3737 for the TCP port. The spec's own placeholder is not valid hex.
+# The firmware, this and the mobile app must agree; nothing else depends on them.
+SERVICE_UUID = "544a4950-3737-4001-8000-000000000001"
+CHAR_RX_UUID = "544a4950-3737-4001-8000-000000000002"  # host -> device (write)
+CHAR_TX_UUID = "544a4950-3737-4001-8000-000000000003"  # device -> host (notify)
+CHAR_INFO_UUID = "544a4950-3737-4001-8000-000000000004"  # static identity (read)
 
 #: Conservative default; renegotiated upward on connect where the OS allows it.
 FALLBACK_MTU = 20

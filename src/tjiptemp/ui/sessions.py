@@ -63,6 +63,30 @@ class ExportWorker(QThread):
         self.finished_ok.emit(str(result))
 
 
+class SessionLoadWorker(QThread):
+    """Loads session data off the GUI thread so large recordings don't freeze the UI."""
+
+    finished = Signal(object, object, object, int)
+    failed = Signal(str)
+
+    def __init__(self, db: Database, session_id: int, max_rows: int = 400_000,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self.db = db
+        self.session_id = session_id
+        self.max_rows = max_rows
+
+    def run(self) -> None:
+        try:
+            db = Database(self.db.path)
+            times, values, ids = db.read_session(self.session_id, max_rows=self.max_rows)
+            db.close()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(times, values, ids, self.session_id)
+
+
 class ExportDialog(QDialog):
     """Choose format, range, channels and time representation."""
 
@@ -147,6 +171,7 @@ class SessionBrowser(QWidget):
         self.db = app.db
         self.theme = theme
         self._worker: ExportWorker | None = None
+        self._load_worker: SessionLoadWorker | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -254,15 +279,21 @@ class SessionBrowser(QWidget):
         if info is None or info.rows == 0:
             return
 
-        try:
-            times, values, ids = self.db.read_session(info.id, max_rows=400_000)
-        except Exception as exc:
-            self.plot.setTitle(f"Could not read session: {exc}")
+        self.plot.setTitle("Loading…")
+        worker = SessionLoadWorker(self.db, info.id, max_rows=400_000, parent=self)
+        worker.finished.connect(self._on_session_loaded)
+        worker.failed.connect(lambda msg: self.plot.setTitle(f"Could not read session: {msg}"))
+        self._load_worker = worker
+        worker.start()
+
+    def _on_session_loaded(self, times, values, ids, session_id) -> None:
+        info = self.selected()
+        if info is None or info.id != session_id:
             return
         if times.size == 0:
+            self.plot.setTitle("No data")
             return
 
-        # Preview only the largest unit group, so the single axis stays honest.
         groups: dict[str, list[int]] = {}
         for cid in ids:
             spec = spec_for(cid)

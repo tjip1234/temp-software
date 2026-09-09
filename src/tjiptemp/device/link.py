@@ -25,7 +25,10 @@ from ..transport.base import Transport, TransportError
 
 log = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT_S = 4.0
+#: A board answers in milliseconds when it is running. This budget exists for
+#: the case where it is not: a reboot mid-request, or a WiFi link that has
+#: silently gone away and has not yet been noticed.
+DEFAULT_TIMEOUT_S = 12.0
 #: GET_RANGE can legitimately take a while: it is reading a big ring buffer out.
 RANGE_TIMEOUT_S = 30.0
 
@@ -267,6 +270,17 @@ class Link:
 
     async def self_test(self) -> dict:
         return await self.request_json(M.self_test(), timeout=20.0)
+
+    async def sim_calibrate(self, utc: float | None = None) -> dict:
+        """Ask for a wiper sweep. Returns the board's immediate acknowledgement.
+
+        The sweep itself runs for ~15 s afterwards; watch ``STATUS.sim`` for
+        progress and the unsolicited ``SIM_CAL`` for the finished table.
+        """
+        return await self.request_json(M.sim_calibrate(utc), timeout=10.0)
+
+    async def get_sim_cal(self) -> dict:
+        return await self.request_json(M.get_sim_cal(), timeout=15.0)
 
     async def wifi_provision(self, ssid: str, psk: str) -> dict:
         return await self.request_json(M.wifi_provision(ssid, psk), timeout=30.0)

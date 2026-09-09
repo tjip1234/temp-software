@@ -80,6 +80,10 @@ class Recorder:
         self._pending: dict[str, list[dict]] = {}
         self._pending_rows: dict[str, int] = {}
         self._flush_task: asyncio.Task | None = None
+        #: asyncio keeps only a weak reference to a running task, so a flush
+        #: whose only reference was the local in _spawn_flush could be collected
+        #: mid-write and take its buffered rows with it.
+        self._flushes: set[asyncio.Task] = set()
         self._listeners: list = []
 
     # ---------------------------------------------------------------- control
@@ -156,6 +160,10 @@ class Recorder:
         return recording
 
     async def stop_all(self) -> None:
+        # Let flushes already in flight finish before stopping anything: they
+        # are holding rows that are not on disk yet.
+        if self._flushes:
+            await asyncio.gather(*self._flushes, return_exceptions=True)
         for serial in list(self._active):
             with contextlib.suppress(Exception):
                 await self.stop(serial)
@@ -195,7 +203,9 @@ class Recorder:
 
     def _spawn_flush(self, serial: str) -> None:
         with contextlib.suppress(RuntimeError):
-            asyncio.get_running_loop().create_task(self.flush(serial))
+            task = asyncio.get_running_loop().create_task(self.flush(serial))
+            self._flushes.add(task)
+            task.add_done_callback(self._flushes.discard)
 
     async def flush(self, serial: str) -> int:
         """Write buffered blocks for one device. Returns rows written."""

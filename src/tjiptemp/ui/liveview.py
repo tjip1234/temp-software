@@ -53,7 +53,7 @@ WINDOWS = [
 
 #: Points per trace handed to the GPU. Beyond this the eye gains nothing and the
 #: frame rate suffers.
-TARGET_POINTS = 2500
+TARGET_POINTS = 1500
 
 
 class TimeAxis(pg.AxisItem):
@@ -220,6 +220,8 @@ class LiveView(QWidget):
         self._plot_area.setSpacing(4)
         root.addLayout(self._plot_area, 1)
 
+        self._last_generation = -1
+
         self._timer = QTimer(self)
         self._timer.setInterval(100)  # 10 fps: plenty for a thermometer
         self._timer.timeout.connect(self.refresh)
@@ -291,24 +293,32 @@ class LiveView(QWidget):
         if not self._plots:
             return
 
+        gen = self.device.live.generation
+        if gen == self._last_generation and not force:
+            return
+        self._last_generation = gen
+
         span = self.window_s if self.window_s > 0 else None
+        if span is None:
+            t_all, v_all = self.device.live.view()
+        else:
+            t_all, v_all = self.device.live.window(span)
+
         total_points = 0
         for plot in self._plots.values():
+            plot.blockSignals(True)
             for cid in plot.curves:
                 index = self.device.channel_index(cid)
                 if index is None:
                     continue
-                if span is None:
-                    t, v = self.device.live.view()
-                else:
-                    t, v = self.device.live.window(span)
-                if t.size == 0:
-                    plot.set_data(cid, t, np.zeros(0))
+                if t_all.size == 0:
+                    plot.set_data(cid, t_all, np.zeros(0))
                     continue
-                column = v[:, index]
-                t_dec, v_dec = DecimatingView.decimate(t, column, TARGET_POINTS)
+                column = v_all[:, index]
+                t_dec, v_dec = DecimatingView.decimate(t_all, column, TARGET_POINTS)
                 plot.set_data(cid, t_dec, v_dec)
                 total_points += t_dec.size
+            plot.blockSignals(False)
             if self.autoscale_box.isChecked():
                 plot.enableAutoRange(axis="y")
 

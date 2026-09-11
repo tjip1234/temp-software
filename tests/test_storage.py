@@ -228,7 +228,7 @@ def test_csv_export_carries_provenance(db, populated, tmp_path):
 def test_csv_export_honours_a_time_range(db, populated, tmp_path):
     options = ExportOptions(t_from=1_800_000_005.0, t_to=1_800_000_010.0)
     path = to_csv(db, populated, tmp_path / "slice.csv", options)
-    rows = [line for line in path.read_text().splitlines()
+    rows = [line for line in path.read_text(encoding="utf-8").splitlines()
             if line and not line.startswith("#")]
     assert 40 < len(rows) < 60  # header plus ~51 samples
 
@@ -248,7 +248,7 @@ def test_json_export_is_self_describing(db, populated, tmp_path):
     import json
 
     path = to_json(db, populated, tmp_path / "out.json")
-    document = json.loads(path.read_text())
+    document = json.loads(path.read_text(encoding="utf-8"))
     assert document["format"] == "tjiptemp-export/1"
     assert {c["key"] for c in document["channels"]} == {"pt1000", "typek", "v_bat"}
     assert document["data"]["typek"][50] is None, "NaN must export as null, not 0"

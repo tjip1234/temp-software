@@ -17,7 +17,7 @@ UI_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "tjiptemp" / "ui"
 
 
 def _modals_in_coroutines(path: pathlib.Path) -> list[tuple[int, str, str]]:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     found: list[tuple[int, str, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.AsyncFunctionDef):
@@ -58,7 +58,7 @@ def test_message_later_defers_rather_than_showing():
     """The helper must not call into QMessageBox during the caller's turn."""
     from tjiptemp.ui import widgets
 
-    source = ast.parse(pathlib.Path(widgets.__file__).read_text())
+    source = ast.parse(pathlib.Path(widgets.__file__).read_text(encoding="utf-8"))
     func = next(
         node for node in ast.walk(source)
         if isinstance(node, ast.FunctionDef) and node.name == "message_later"
@@ -81,7 +81,7 @@ def test_connect_retries_a_link_that_dies_mid_handshake():
     assert 0 < D.HANDSHAKE_RETRY_S <= 5.0
     # A wrong protocol version is an answer, not a dead link, so it must not be
     # retried for the whole window.
-    source = pathlib.Path(D.__file__).read_text()
+    source = pathlib.Path(D.__file__).read_text(encoding="utf-8")
     assert "fatal = isinstance(exc, (M.DeviceError, M.ProtocolError))" in source
     # And the retry must not reopen the port; see the behavioural test in
     # tests/test_device.py for why.
@@ -115,7 +115,7 @@ def test_serial_port_is_opened_without_pulsing_the_modem_lines():
     src = pathlib.Path(
         __file__
     ).resolve().parents[1] / "src" / "tjiptemp" / "transport" / "serial_cdc.py"
-    tree = ast.parse(src.read_text())
+    tree = ast.parse(src.read_text(encoding="utf-8"))
     func = next(
         node for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "_blocking_open"
@@ -157,7 +157,7 @@ def test_modem_lines_are_written_atomically_and_survive_close():
     import pathlib
 
     src = (pathlib.Path(__file__).resolve().parents[1]
-           / "src" / "tjiptemp" / "transport" / "serial_cdc.py").read_text()
+           / "src" / "tjiptemp" / "transport" / "serial_cdc.py").read_text(encoding="utf-8")
 
     assert "TIOCMSET" in src, (
         "the modem lines must be written in one ioctl, not one per line"

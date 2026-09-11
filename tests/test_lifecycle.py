@@ -72,14 +72,17 @@ def test_gui_shutdown_runs_the_async_close(tmp_path):
 
     src = str(pathlib.Path(__file__).resolve().parents[1] / "src")
     script = tmp_path / "probe.py"
-    script.write_text(SHUTDOWN_PROBE.format(src=src))
+    script.write_text(SHUTDOWN_PROBE.format(src=src), encoding="utf-8")
 
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
     env["TJIPTEMP_CONFIG_DIR"] = str(tmp_path / "config")
+    # Both ends in UTF-8: on Windows the child would otherwise write its
+    # output in the ANSI code page, and this side would read it as something else.
+    env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.run(
         [sys.executable, str(script)], env=env, capture_output=True,
-        text=True, timeout=120,
+        text=True, encoding="utf-8", errors="replace", timeout=120,
     )
     assert "RESULT 0 1" in proc.stdout, (
         f"the window closed without shutting the application down\n"
@@ -141,7 +144,7 @@ def test_device_tab_closes_the_simulator_panel():
     source = (
         pathlib.Path(__file__).resolve().parents[1]
         / "src" / "tjiptemp" / "ui" / "devicetab.py"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     tree = ast.parse(source)
     close_tab = next(
         node for node in ast.walk(tree)
@@ -176,7 +179,7 @@ def test_calibration_panel_stops_when_its_tab_closes():
     source = (
         pathlib.Path(__file__).resolve().parents[1]
         / "src" / "tjiptemp" / "ui" / "devicetab.py"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     close_tab = next(
         node for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.FunctionDef) and node.name == "close_tab"
@@ -322,7 +325,8 @@ def test_a_settings_file_from_before_the_change_is_migrated(tmp_path):
     from tjiptemp.core.application import SETTINGS_VERSION, Settings
 
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps({"auto_connect_usb": True, "stream_rate_hz": 10.0}))
+    path.write_text(json.dumps({"auto_connect_usb": True, "stream_rate_hz": 10.0}),
+                    encoding="utf-8")
 
     migrated = Settings.load(path)
     assert migrated.auto_connect_usb is False

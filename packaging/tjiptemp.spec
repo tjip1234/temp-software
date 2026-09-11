@@ -119,7 +119,11 @@ exe = EXE(
     upx=False,          # UPX and macOS code signing do not get along
     console=False,      # a GUI app; --headless users run the module directly
     argv_emulation=IS_MAC,
-    target_arch="universal2" if IS_MAC else None,
+    # The builder's own architecture, on every platform. A universal2 Mac app
+    # needs every compiled wheel to be universal2 too, and PyPI's are not:
+    # Pillow's _avif and numpy ship one architecture each, so the first CI
+    # build stopped with "is not a fat binary". macos-latest is Apple Silicon.
+    target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
     icon=ICON,

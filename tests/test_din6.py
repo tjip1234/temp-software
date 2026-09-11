@@ -244,6 +244,117 @@ def _items(box):
     return [box.itemData(i) for i in range(box.count())]
 
 
+# ------------------------------------------------------------- calibration tab
+
+def _calibration_panel():
+    from tjiptemp.device.device import Device
+    from tjiptemp.protocol.channels import DEFAULT_CHANNELS
+    from tjiptemp.ui.calibration import CalibrationPanel
+    from tjiptemp.ui.theme import resolve
+
+    device = Device(serial="TJIP-CAL000000001", name="probe")
+    device.channels = {spec.id: spec for spec in DEFAULT_CHANNELS}
+    return device, CalibrationPanel(device, resolve("dark"))
+
+
+def test_calibration_offers_only_the_probes(qt_app_or_skip):
+    """PT1000, Type K and the outside NTCs -- not the board's own thermistors,
+    the cold junction, the supply rails or the humidity sensor."""
+    _device, panel = _calibration_panel()
+    try:
+        assert _items(panel.channel_box) == [
+            int(Ch.PT1000), int(Ch.TYPEK), int(Ch.NTC_EXT1),
+            int(Ch.NTC_EXT2), int(Ch.NTC_EXT3), int(Ch.NTC_EXT4),
+        ]
+    finally:
+        panel.close_panel()
+
+
+def test_captured_points_survive_switching_channels(qt_app_or_skip):
+    _device, panel = _calibration_panel()
+    try:
+        panel.points.add_point(1000.1, 0.01, 0.0)
+        panel._refit()
+        panel.channel_box.setCurrentIndex(panel.channel_box.findData(int(Ch.NTC_EXT1)))
+        assert panel.points.points == []
+        panel.channel_box.setCurrentIndex(panel.channel_box.findData(int(Ch.PT1000)))
+        assert len(panel.points.points) == 1
+        assert "pt1000" in panel._fits
+    finally:
+        panel.close_panel()
+
+
+async def test_writing_keeps_what_the_board_has_for_other_channels(qt_app_or_skip):
+    """The tab outlives any one visit, so a copy taken when it was built would
+    overwrite channels that were recalibrated since."""
+    from tjiptemp.calibration.models import ChannelCal
+
+    device, panel = _calibration_panel()
+    # Recalibrated after the tab was built -- by another host, say.
+    device.calibration.set("ntc_ext1", ChannelCal(
+        model="beta", params={"r0": 10000.0, "t0_c": 25.0, "beta": 3950.0}))
+    written = []
+
+    async def write(cal):
+        written.append(cal)
+        return cal
+
+    device.write_calibration = write
+    try:
+        panel.points.add_point(1000.1, 0.01, 0.0)
+        panel._refit()
+        await panel._write()
+        assert written[0].get("pt1000").model == "cvd"
+        assert written[0].get("ntc_ext1").model == "beta"
+        assert not panel._fits
+        assert panel.points.points == []
+    finally:
+        panel.close_panel()
+
+
+def test_a_new_tab_shows_the_boards_display_settings(qt_app_or_skip):
+    """The handshake fetches CONFIG before the tab exists, so the tab must read it.
+
+    It did not: the Page and Channel lists stayed empty until some unrelated
+    change fetched CONFIG again. ``_tab`` syncs by hand, which is why the
+    other tests here never noticed -- this one deliberately does not.
+    """
+    from tjiptemp.core.application import Application, Settings
+    from tjiptemp.device.device import Device
+    from tjiptemp.ui.devicetab import DeviceTab
+    from tjiptemp.ui.theme import resolve
+
+    device = Device(serial="TJIP-DISPLAY0001", name="screen")
+    device.info = {"model": "tjiptemp-s3", "channels": [], "caps": {}}
+    device.config = {**SENSOR_CONFIG, "display": {
+        **SENSOR_CONFIG["display"], "page": "single", "rotation": 90, "backlight": 40}}
+    app = Application(Settings(api_enabled=False),
+                      db_path=pathlib.Path(tempfile.mkdtemp()) / "displaytest.tjip")
+    tab = DeviceTab(app, device, resolve("dark"))
+    try:
+        assert tab.page_box.count() > 0
+        assert tab.page_box.currentData() == "single"
+        assert tab.rotation_box.currentData() == 90
+        assert tab.backlight.value() == 40
+    finally:
+        tab.close_tab()
+
+
+def test_backlight_is_sent_on_a_click_not_only_after_a_drag(qt_app_or_skip):
+    from PySide6.QtWidgets import QAbstractSlider
+
+    tab = _tab(qt_app_or_skip, None)
+    pushes = []
+    tab._push_display = lambda: pushes.append(tab.backlight.value())
+    try:
+        tab.backlight.triggerAction(QAbstractSlider.SliderAction.SliderPageStepSub)
+        assert pushes == [70]
+        tab._sync_from_config()     # filling in from CONFIG must not push it back
+        assert pushes == [70]
+    finally:
+        tab.close_tab()
+
+
 def test_sensors_tab_locks_controls_the_board_cannot_honour(qt_app_or_skip):
     """A control that stores a value and does nothing is worse than no control.
 

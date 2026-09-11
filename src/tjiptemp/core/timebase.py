@@ -274,7 +274,10 @@ class SyncScheduler:
     """
 
     burst_count: int = 8
-    burst_interval_s: float = 0.15
+    #: The burst spans too little time to fit a slope (see Timebase._refit), so
+    #: spacing it out buys nothing: it is eight chances at a short round trip
+    #: for the offset. At 0.15 s it was over a second of every connect.
+    burst_interval_s: float = 0.05
     steady_interval_s: float = 30.0
     _sent: int = field(default=0, init=False)
     _next_at: float = field(default=0.0, init=False)

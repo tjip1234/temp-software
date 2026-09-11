@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 from ..device.device import Device, DeviceEvent
 from ..protocol.channels import Ch
 from ..sensors.rtd import resolution_c, wire_mode_note
-from .calibration import CalibrationDialog
+from .calibration import CalibrationPanel
 from .liveview import LiveView
 from .simpanel import SimulatorPanel
 from .theme import Theme
@@ -126,6 +126,8 @@ class DeviceTab(QWidget):
         self.side = side = QTabWidget()
         side.addTab(self._build_channels_tab(), "Channels")
         side.addTab(self._build_settings_tab(), "Sensors")
+        self.calibration = CalibrationPanel(device, theme)
+        side.addTab(self.calibration, "Calibration")
         side.addTab(self._build_display_tab(), "Board screen")
         side.addTab(self._build_diagnostics_tab(), "Diagnostics")
         #: Added when DEVICE_INFO says this board emulates a PT1000. It arrives
@@ -143,6 +145,12 @@ class DeviceTab(QWidget):
         self._timer.start()
 
         self._rebuild_channels()
+        # The handshake fetched CONFIG before this tab existed, so the "config"
+        # event that fills the controls has already been and gone. Without this
+        # the Page and Channel lists stayed empty, and the sensor controls
+        # showed defaults rather than the board's values, until some unrelated
+        # change happened to fetch CONFIG again.
+        self._sync_from_config()
         self._loading_display = False
         self._refresh()
 
@@ -187,10 +195,6 @@ class DeviceTab(QWidget):
         )
         self.wifi_button.clicked.connect(self._open_wifi)
         layout.addWidget(self.wifi_button)
-
-        self.calibrate_button = QPushButton("Calibrate…")
-        self.calibrate_button.clicked.connect(self._open_calibration)
-        layout.addWidget(self.calibrate_button)
         return layout
 
     # ---------------------------------------------------------------- channels
@@ -426,7 +430,13 @@ class DeviceTab(QWidget):
         self.backlight = QSlider(Qt.Orientation.Horizontal)
         self.backlight.setRange(0, 100)
         self.backlight.setValue(80)
+        # On release after a drag, and on a click in the groove or a key press,
+        # which move the value without any release -- those used to go nowhere.
+        # Not on every step of a drag: each push is an NVS write on the board.
         self.backlight.sliderReleased.connect(self._push_display)
+        self.backlight.valueChanged.connect(
+            lambda _value: None if self.backlight.isSliderDown() else self._push_display()
+        )
         form.addRow("Backlight", self.backlight)
         layout.addLayout(form)
 
@@ -561,11 +571,20 @@ class DeviceTab(QWidget):
     def _sync_from_config(self) -> None:
         config = self.device.config
         if not config:
+            # A board whose CONFIG never arrived still has pages and channels
+            # to offer; an empty list is not something anyone can pick from.
+            blocked = self.source_box.blockSignals(True)
+            try:
+                self._sync_page_box(self.page_box.currentData() or "overview")
+                self._sync_source_box(int(self.source_box.currentData() or 0))
+                self._update_display_rows()
+            finally:
+                self.source_box.blockSignals(blocked)
             return
         blockers = (self.wires_box, self.filter_box, self.rref_input, self.tc_type_box,
                     self.cj_box, self.tc_avg_box, self.rate_input, self.ring_input,
                     self.page_box, self.source_box, self.rotation_box,
-                    self.display_window)
+                    self.display_window, self.backlight)
         for widget in blockers:
             widget.blockSignals(True)
         try:
@@ -743,8 +762,11 @@ class DeviceTab(QWidget):
         elif page == "graph":
             traces = self._checked_traces()
             payload["window_s"] = int(self.display_window.currentData())
+            # Sent even when empty: leaving it out kept the board's last
+            # selection, so unticking the last trace was undone the moment the
+            # board's CONFIG came back.
+            payload["sources"] = traces
             if traces:
-                payload["sources"] = traces
                 payload["source"] = int(traces[0])
 
         async def run() -> None:
@@ -806,20 +828,6 @@ class DeviceTab(QWidget):
             # open would leave another hidden dialog behind, polling STATUS.
             dialog.deleteLater()
 
-    def _open_calibration(self) -> None:
-        if not self.device.is_online:
-            QMessageBox.information(
-                self, "Board offline",
-                "Calibration writes to the board's memory, so the board has to be "
-                "connected."
-            )
-            return
-        dialog = CalibrationDialog(self.device, self.theme, self)
-        try:
-            dialog.exec()
-        finally:
-            dialog.deleteLater()
-
     # ------------------------------------------------------------------ events
 
     def _on_event(self, event: DeviceEvent) -> None:
@@ -827,6 +835,7 @@ class DeviceTab(QWidget):
             self._sync_from_config()
         if event.kind == "info":
             self._rebuild_channels()
+            self.calibration.refresh_channels()
 
     def _refresh(self) -> None:
         device = self.device
@@ -884,7 +893,6 @@ class DeviceTab(QWidget):
             self.record_button.setProperty("destructive", False)
         self.record_button.style().polish(self.record_button)
         self.record_button.setEnabled(device.is_online)
-        self.calibrate_button.setEnabled(device.is_online)
 
     def set_theme(self, theme: Theme) -> None:
         self.theme = theme
@@ -906,3 +914,4 @@ class DeviceTab(QWidget):
         if self.sim_panel is not None:
             self.sim_panel.close_panel()
             self.sim_panel = None
+        self.calibration.close_panel()

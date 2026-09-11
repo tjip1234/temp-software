@@ -150,24 +150,38 @@ def test_device_tab_closes_the_simulator_panel():
     assert "close_panel" in ast.dump(close_tab)
 
 
-def test_calibration_dialog_tears_down_on_reject():
-    """Cancel and Esc go through done(), which never produces a close event."""
+def test_calibration_panel_stops_when_its_tab_closes():
+    """The panel lives as long as its board's tab, so close_tab() has to stop
+    its live timer and any capture still in flight."""
+    import ast
+    import pathlib
+
     pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
 
-    from tjiptemp.ui.calibration import CalibrationDialog
+    from tjiptemp.ui.calibration import CalibrationPanel
     from tjiptemp.ui.theme import resolve
 
     qt = QApplication.instance() or QApplication([])
     device = Device(serial="TJIP-TEST00000001", name="probe")
     device.info = {"channels": []}
 
-    dialog = CalibrationDialog(device, resolve("dark"))
-    assert dialog._live_timer.isActive()
-    dialog.reject()
+    panel = CalibrationPanel(device, resolve("dark"))
+    assert panel._live_timer.isActive()
+    panel.close_panel()
     qt.processEvents()
-    assert not dialog._live_timer.isActive(), "the live timer survived Cancel"
-    dialog.deleteLater()
+    assert not panel._live_timer.isActive(), "the live timer survived close_panel()"
+    panel.deleteLater()
+
+    source = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src" / "tjiptemp" / "ui" / "devicetab.py"
+    ).read_text()
+    close_tab = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "close_tab"
+    )
+    assert "attr='calibration'" in ast.dump(close_tab)
 
 
 # ---------------------------------------------------------------- reconnect

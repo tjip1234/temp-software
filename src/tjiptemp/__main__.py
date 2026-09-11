@@ -65,20 +65,64 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def configure_logging(verbosity: int) -> None:
+#: Per log file, and how many rotated ones to keep: a few days of connects,
+#: disconnects and errors, at a size nobody has to think about.
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUPS = 3
+
+
+def configure_logging(verbosity: int):
+    """Console at the verbosity asked for, plus a rotating log file, always.
+
+    The file is what makes "it took ages to connect" diagnosable after the
+    fact, from the timings of the attempt that actually did -- and a windowed
+    build on Windows or macOS has no console to read at all. It records INFO
+    and up, or everything under -vv. Returns its path, or None if it could not
+    be opened.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    from .core.application import log_path
+
     level = logging.WARNING
     if verbosity == 1:
         level = logging.INFO
     elif verbosity >= 2:
         level = logging.DEBUG
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)-7s %(name)-28s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    file_level = min(level, logging.INFO)
+
+    root = logging.getLogger()
+    root.setLevel(file_level)
+    console = logging.StreamHandler()
+    console.setLevel(level)
+    console.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)-28s %(message)s", datefmt="%H:%M:%S"))
+    root.addHandler(console)
+
+    path = log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8")
+    except OSError as exc:
+        logging.getLogger(__name__).warning("not keeping a log file at %s: %s", path, exc)
+        path = None
+    else:
+        handler.setLevel(file_level)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s.%(msecs)03d %(levelname)-7s %(name)-28s %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"))
+        root.addHandler(handler)
+
     # These are chatty at DEBUG and rarely what you are looking for.
     for noisy in ("asyncio", "matplotlib", "PIL", "bleak", "zeroconf"):
         logging.getLogger(noisy).setLevel(max(level, logging.INFO))
+
+    import platform
+    logging.getLogger(__name__).info(
+        "%s %s starting (Python %s, %s)", APP_NAME, __version__,
+        platform.python_version(), platform.platform())
+    return path
 
 
 def apply_overrides(settings, args) -> None:

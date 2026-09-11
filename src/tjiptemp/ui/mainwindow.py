@@ -29,9 +29,10 @@ from PySide6.QtWidgets import (
 )
 
 from .. import APP_NAME, __version__
-from ..core.application import Application
+from ..core.application import Application, log_path
 from ..device.device import Device, DeviceEvent
 from ..transport.ble import availability_note
+from ..transport.discovery import discover_serial
 from . import theme as theme_module
 from .devicetab import DeviceTab
 from .sessions import SessionBrowser
@@ -89,17 +90,21 @@ class ConnectDialog(QDialog):
         asyncio.ensure_future(self.scan())
 
     async def scan(self) -> None:
-        self.status.setText("Scanning for boards…")
         self.list.clear()
+        self._candidates = []
+        # USB ports are listed straight away. The network browse takes a few
+        # seconds, and a board on a cable should not have to wait behind it.
+        self._add_candidates(discover_serial())
+        self.status.setText(
+            f"{len(self._candidates)} USB port(s) · still looking on the network…"
+            if self._candidates else "Scanning for boards…"
+        )
         try:
-            self._candidates = await self.app.discover(bluetooth=self.bluetooth.isChecked())
+            found = await self.app.discover(usb=False, bluetooth=self.bluetooth.isChecked())
         except Exception as exc:
-            self.status.setText(f"Scan failed: {exc}")
+            self.status.setText(f"Network scan failed: {exc}")
             return
-        for candidate in self._candidates:
-            item = QListWidgetItem(f"{candidate.kind.upper()}   {candidate.label}")
-            item.setData(Qt.ItemDataRole.UserRole, candidate)
-            self.list.addItem(item)
+        self._add_candidates(found)
         if not self._candidates:
             self.status.setText(
                 "Nothing found. Plug a board in over USB, or type an address below. "
@@ -110,6 +115,13 @@ class ConnectDialog(QDialog):
                 f"{len(self._candidates)} candidate(s). A port is only confirmed as a "
                 f"board once it answers."
             )
+
+    def _add_candidates(self, candidates) -> None:
+        for candidate in candidates:
+            self._candidates.append(candidate)
+            item = QListWidgetItem(f"{candidate.kind.upper()}   {candidate.label}")
+            item.setData(Qt.ItemDataRole.UserRole, candidate)
+            self.list.addItem(item)
 
     def chosen(self):
         item = self.list.currentItem()
@@ -378,10 +390,12 @@ class MainWindow(QMainWindow):
         try:
             await self.app.connect(target)
         except Exception as exc:
+            log.warning("could not connect to %s: %s", getattr(target, "address", target), exc)
             message_later("critical",
                 self, "Could not connect",
                 f"{exc}\n\nIf this is a serial port, check that no other program has "
-                f"it open and that you have permission to use it."
+                f"it open and that you have permission to use it.\n\n"
+                f"Details are in the log: {log_path()}"
             )
 
     async def _auto_connect(self) -> None:
@@ -471,6 +485,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Copied {url}", 4000)
 
     def _on_about(self) -> None:
+        from html import escape
+
         QMessageBox.about(
             self, f"About {APP_NAME}",
             f"<b>{APP_NAME} {__version__}</b><br><br>"
@@ -478,7 +494,8 @@ class MainWindow(QMainWindow):
             f"board.<br><br>"
             f"Speaks TJIP-1 over USB CDC, WiFi and BLE. The wire protocol is fully "
             f"documented in <code>docs/protocol.md</code>, and a portable C reference "
-            f"codec ships in <code>firmware-ref/</code>."
+            f"codec ships in <code>firmware-ref/</code>.<br><br>"
+            f"Log file: <code>{escape(str(log_path()))}</code>"
         )
 
     # ------------------------------------------------------------------ status

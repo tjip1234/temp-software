@@ -17,13 +17,19 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from platformdirs import user_config_dir, user_data_dir
+from platformdirs import user_config_dir, user_data_dir, user_log_dir
 
 from .. import APP_NAME
 from ..device.device import Device, DeviceEvent, DeviceManager
 from ..storage.db import Database
 from ..storage.recorder import Recorder
-from ..transport.discovery import Candidate, build_transport, discover_all, parse_address
+from ..transport.discovery import (
+    Candidate,
+    build_transport,
+    discover_all,
+    discover_serial,
+    parse_address,
+)
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +50,18 @@ def config_dir() -> Path:
 
 def data_dir() -> Path:
     return Path(user_data_dir(APP_NAME, appauthor=False))
+
+
+def log_dir() -> Path:
+    """Where the rotating log file lives. ``TJIPTEMP_LOG_DIR`` overrides it."""
+    override = os.environ.get("TJIPTEMP_LOG_DIR")
+    if override:
+        return Path(override)
+    return Path(user_log_dir(APP_NAME, appauthor=False))
+
+
+def log_path() -> Path:
+    return log_dir() / "tjiptemp.log"
 
 
 def default_db_path() -> Path:
@@ -190,6 +208,9 @@ class Application:
         from ..api.broadcast import TemperatureBroadcast
         self.broadcast = TemperatureBroadcast(self)
         self._listeners: list[Callable[[DeviceEvent], None]] = []
+        #: Connects still in their handshake, by link key, so a second request
+        #: for the same address joins the first instead of opening it again.
+        self._connecting: dict[str, asyncio.Task] = {}
         self.devices.subscribe(self._on_device_event)
 
     # ------------------------------------------------------------------ events
@@ -213,18 +234,49 @@ class Application:
 
     # -------------------------------------------------------------- connecting
 
-    async def discover(self, *, bluetooth: bool | None = None) -> list[Candidate]:
+    async def discover(
+        self, *, usb: bool = True, bluetooth: bool | None = None
+    ) -> list[Candidate]:
         return await discover_all(
-            usb=True,
+            usb=usb,
             wifi=self.settings.mdns_discovery,
             bluetooth=self.settings.ble_discovery if bluetooth is None else bluetooth,
         )
 
     async def connect(self, target: str | Candidate) -> Device:
-        """Connect to an address string or a discovered candidate."""
+        """Connect to an address string or a discovered candidate.
+
+        Asking for an address that is already connected returns that board, and
+        asking while a connect to it is still in its handshake waits for that
+        attempt. Clicking again during a slow connect used to open the port a
+        second time; the first attempt already held it, so the second failed
+        with "already open in another program" -- a failure reported for a
+        board that was, in fact, connecting.
+        """
         candidate = target if isinstance(target, Candidate) else parse_address(target)
         if candidate is None:
             raise ValueError(f"could not interpret {target!r} as a device address")
+        key = candidate.key
+        for device in self.devices.devices.values():
+            if any(link.key == key and link.is_open for link in device.links.values()):
+                return device
+        inflight = self._connecting.get(key)
+        if inflight is not None:
+            log.info("already connecting to %s; waiting for that attempt", candidate.address)
+            # Shielded: giving up on the wait must not cancel the attempt it joined.
+            return await asyncio.shield(inflight)
+
+        task = asyncio.ensure_future(self._connect(candidate))
+        self._connecting[key] = task
+
+        def forget(done: asyncio.Task) -> None:
+            if self._connecting.get(key) is done:
+                del self._connecting[key]
+
+        task.add_done_callback(forget)
+        return await task
+
+    async def _connect(self, candidate: Candidate) -> Device:
         # The rate is a fallback, not an instruction: Device._adopt_board_settings
         # replaces it with the board's own acquire.rate_hz during the handshake,
         # and streaming then starts at whatever the board was already set to.
@@ -242,15 +294,27 @@ class Application:
         A serial port that turns out not to be a board is skipped without fuss:
         the whole point of requiring a DEVICE_INFO before believing anything is
         that probing is safe.
+
+        Only USB is scanned: this used to run the network browse as well, which
+        is three seconds of waiting for results that were then thrown away. And
+        the ports are tried at once rather than in turn, because a port that is
+        not a board uses up the whole handshake window before giving up, and a
+        board further down the list should not have to wait for it.
         """
+        candidates = discover_serial()
+        log.info("USB scan: %s",
+                 "; ".join(c.label for c in candidates) or "no candidate ports")
+        outcomes = await asyncio.gather(
+            *(self.connect(candidate) for candidate in candidates), return_exceptions=True
+        )
         connected: list[Device] = []
-        for candidate in await self.discover(bluetooth=False):
-            if candidate.kind != "usb":
-                continue
-            try:
-                connected.append(await self.connect(candidate))
-            except Exception as exc:
-                log.debug("%s is not a TjipTemp board: %s", candidate.address, exc)
+        for candidate, outcome in zip(candidates, outcomes, strict=True):
+            if isinstance(outcome, Device):
+                if outcome not in connected:
+                    connected.append(outcome)
+            else:
+                log.info("%s did not answer as a TjipTemp board: %s",
+                         candidate.address, outcome)
         return connected
 
     async def disconnect(self, serial: str) -> None:

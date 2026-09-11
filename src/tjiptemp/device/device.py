@@ -69,6 +69,14 @@ LIVE_CAPACITY = 120_000
 #: had to outlast a loop it was itself feeding.
 HANDSHAKE_WINDOW_S = 12.0
 HANDSHAKE_RETRY_S = 1.5
+#: How long one HELLO waits before it is sent again, growing by this much per
+#: attempt. A running board answers in milliseconds; one that does not has
+#: usually not heard the HELLO at all -- it was still booting, because it was
+#: just plugged in or opening the port reset it -- and waiting longer will not
+#: make it hear it. This used to be the link's 12 s default, which is the whole
+#: window: one HELLO lost to a boot meant a 12 s hang and then a failure,
+#: without the retry below ever getting a turn.
+HELLO_TIMEOUT_S = 1.0
 
 
 class DeviceState(Enum):
@@ -181,8 +189,12 @@ class Device:
     async def add_transport(self, transport: Transport, *, start_stream: bool = True) -> Link:
         """Attach a transport, handshake over it, and fold it into the sample stream."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + HANDSHAKE_WINDOW_S
+        started = loop.time()
+        deadline = started + HANDSHAKE_WINDOW_S
         attempt = 0
+
+        def elapsed_ms() -> float:
+            return (loop.time() - started) * 1000.0
 
         link = Link(transport, on_unsolicited=self._on_unsolicited)
         key = link.key
@@ -192,6 +204,7 @@ class Device:
         if self.state is DeviceState.OFFLINE:
             self._set_state(DeviceState.CONNECTING)
 
+        log.info("connecting to %s", transport.info)
         while True:
             attempt += 1
             try:
@@ -203,7 +216,8 @@ class Device:
                 # merely quiet gets asked again on the link that is already up.
                 if not transport.is_open:
                     await link.start()
-                await self._handshake(link)
+                    log.info("%s: port open after %.0f ms", transport.info, elapsed_ms())
+                await self._handshake(link, hello_budget_s=deadline - loop.time())
                 break
             except (TransportError, LinkClosed, TimeoutError,
                     M.DeviceError, M.ProtocolError) as exc:
@@ -221,9 +235,11 @@ class Device:
                             f"{exc} (gave up after {attempt} attempts in "
                             f"{HANDSHAKE_WINDOW_S:.0f} s)",
                         )
+                    log.warning("%s: could not connect (%d attempt(s), %.0f ms): %s",
+                                transport.info, attempt, elapsed_ms(), exc)
                     raise
-                log.info("%s: handshake attempt %d failed (%s); retrying",
-                         self.label, attempt, exc)
+                log.info("%s: handshake attempt %d failed after %.0f ms (%s); retrying",
+                         transport.info, attempt, elapsed_ms(), exc)
                 await asyncio.sleep(HANDSHAKE_RETRY_S)
 
         self._spawn(self._watch_link(link))
@@ -232,6 +248,7 @@ class Device:
         elif start_stream:
             await self.start_streaming(self._stream_rate_hz)
         self._set_state(DeviceState.ONLINE)
+        log.info("%s: online over %s after %.0f ms", self.label, transport.info, elapsed_ms())
         self._emit("links")
         return link
 
@@ -250,15 +267,61 @@ class Device:
         if self._closing:
             return
         self.links.pop(link.key, None)
-        log.info("%s: link %s closed", self.label, link.info)
+        reason = link.info.extra.get("last_error")
+        log.info("%s: link %s closed%s", self.label, link.info,
+                 f" ({reason})" if reason else "")
         self._emit("links", closed=link.key)
         if not self.links:
             self._set_state(DeviceState.OFFLINE, "all links closed")
 
     # --------------------------------------------------------------- handshake
 
-    async def _handshake(self, link: Link) -> None:
-        info = await link.hello()
+    async def _hello(self, link: Link, budget_s: float) -> dict:
+        """HELLO, sent again every HELLO_TIMEOUT_S until one of them is answered.
+
+        The earlier ones keep waiting while the next goes out. A board that
+        missed a HELLO because it was still booting answers the next one; a
+        board that is merely slow answers the first one, late -- which a fixed
+        per-attempt timeout would have abandoned every time.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + budget_s
+        asking: set[asyncio.Task] = set()
+        sent = 0
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"{link.info}: no reply to HELLO within {budget_s:.0f} s "
+                        f"(sent {sent} times)"
+                    )
+                asking.add(asyncio.ensure_future(link.hello(timeout=remaining)))
+                sent += 1
+                if sent > 1:
+                    log.info("%s: no reply to HELLO yet; sending it again", link.info)
+                done, asking = await asyncio.wait(
+                    asking, timeout=min(HELLO_TIMEOUT_S, remaining),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                failed: BaseException | None = None
+                for task in done:
+                    if task.exception() is None:
+                        return task.result()
+                    failed = task.exception()
+                if failed is not None and not isinstance(failed, TimeoutError):
+                    raise failed
+        finally:
+            for task in asking:
+                task.cancel()
+            if asking:
+                await asyncio.gather(*asking, return_exceptions=True)
+
+    async def _handshake(self, link: Link, *, hello_budget_s: float = HANDSHAKE_WINDOW_S) -> None:
+        started = time.monotonic()
+        info = await self._hello(link, hello_budget_s)
+        log.info("%s: HELLO answered after %.0f ms", link.info,
+                 (time.monotonic() - started) * 1000.0)
         proto = int(info.get("proto", 0))
         if proto != M.PROTOCOL_VERSION:
             raise M.ProtocolError(
@@ -278,24 +341,53 @@ class Device:
         self.timebase.note_boot_id(str(info.get("boot_id") or "") or None)
         await self._sync_burst(link)
 
-        with contextlib.suppress(M.DeviceError, TimeoutError):
-            self.config = await link.get_config()
+        config = await self._timed(link, "GET_CONFIG", link.get_config)
+        if config is not None:
+            self.config = config
             self._adopt_board_settings()
             self._emit("config", config=self.config)
-        with contextlib.suppress(M.DeviceError, TimeoutError):
-            self.calibration = CalibrationSet.from_json(await link.get_cal())
+        cal = await self._timed(link, "GET_CAL", link.get_cal)
+        if cal is not None:
+            self.calibration = CalibrationSet.from_json(cal)
             self._emit("cal", calibration=self.calibration)
 
         # The board keeps its simulator sweep in NVS and only pushes SIM_CAL
-        # unsolicited when a new sweep finishes. Without asking for it here, a
-        # board that was calibrated last week showed the panel an empty table
-        # and an unknown state until someone ran another sweep -- the board knew,
-        # and the desktop never asked.
+        # unsolicited when a new sweep finishes. Without asking for it, a board
+        # that was calibrated last week showed the panel an empty table and an
+        # unknown state until someone ran another sweep -- the board knew, and
+        # the desktop never asked. It is asked after going online, though, not
+        # before: nothing about connecting needs it, and a board that did not
+        # answer used to hold every connect for the whole 15 s timeout.
         if self.has_simulator:
-            with contextlib.suppress(M.DeviceError, TimeoutError, LinkClosed,
-                                     TransportError):
-                self.sim_cal = await link.get_sim_cal()
-                self._emit("sim_cal", table=self.sim_cal)
+            self._spawn(self._fetch_sim_cal(link))
+
+    async def _timed(self, link: Link, what: str, request):
+        """One handshake request, timed; None if the board refused or never answered.
+
+        A running board answers in milliseconds, so one that takes seconds is
+        the whole story of a slow connect -- and it used to leave no trace.
+        """
+        started = time.monotonic()
+        try:
+            result = await request()
+        except (M.DeviceError, TimeoutError) as exc:
+            log.warning("%s: %s failed after %.0f ms: %s", link.info, what,
+                        (time.monotonic() - started) * 1000.0, exc)
+            return None
+        log.info("%s: %s answered after %.0f ms", link.info, what,
+                 (time.monotonic() - started) * 1000.0)
+        return result
+
+    async def _fetch_sim_cal(self, link: Link) -> None:
+        try:
+            table = await self._timed(link, "GET_SIM_CAL", link.get_sim_cal)
+        except (LinkClosed, TransportError):
+            return
+        if table is not None:
+            self.sim_cal = table
+            self._emit("sim_cal", table=self.sim_cal)
+        elif self.sim_cal:
+            log.info("%s: the simulator table arrived unsolicited instead", link.info)
 
     def _apply_info(self, info: dict) -> None:
         self.info = info
@@ -349,7 +441,11 @@ class Device:
         """Get an immediately usable timebase before any samples arrive."""
         self._sync.reset()
         accepted = 0
-        for _ in range(self._sync.burst_count):
+        for i in range(self._sync.burst_count):
+            if i:
+                # Between exchanges only: a sleep after the last one was just
+                # time added to every connect.
+                await asyncio.sleep(self._sync.burst_interval_s)
             try:
                 t1, t2, t3, t4 = await link.time_sync()
             except (TimeoutError, M.ProtocolError, LinkClosed):
@@ -357,8 +453,7 @@ class Device:
             if self.timebase.add(SyncSample(t1, t2, t3, t4)):
                 accepted += 1
             self._sync.mark_sent()
-            await asyncio.sleep(self._sync.burst_interval_s)
-        log.debug("%s: %d/%d sync exchanges accepted", self.label, accepted, self._sync.burst_count)
+        log.info("%s: %d/%d sync exchanges accepted", self.label, accepted, self._sync.burst_count)
         self._emit("timebase", fit=self.timebase.fit.to_json())
 
     async def _sync_tick(self) -> None:
@@ -408,6 +503,14 @@ class Device:
                 self._apply_info(M.parse_json(frame))
             elif frame.msg_type == M.Msg.LOG:
                 self._on_log(M.parse_json(frame))
+            elif frame.msg_type == M.Msg.CONFIG:
+                # The board answers DISPLAY_SET with its whole CONFIG, and since
+                # that request is fire-and-forget the answer lands here. It used
+                # to be dropped, which left this copy of the display settings
+                # stale -- and the next sync from it put old values back on the
+                # controls.
+                self.config = M.parse_json(frame)
+                self._emit("config", config=self.config)
             elif frame.msg_type == M.Msg.WIFI_STATUS:
                 self.status["wifi"] = M.parse_json(frame)
                 self._emit("status", status=self.status)
@@ -667,6 +770,11 @@ class Device:
 
     async def set_display(self, **kwargs) -> None:
         await self._on_primary(lambda link: link.display_set(**kwargs), "set the display")
+        # Keep this copy current without waiting for the board's CONFIG answer,
+        # which a firmware is not obliged to send; when it does, it replaces this.
+        patch = {k: v for k, v in kwargs.items() if v is not None}
+        self.config = {**self.config, "display": {**(self.config.get("display") or {}), **patch}}
+        self._emit("config", config=self.config)
 
     async def identify(self, seconds: float = 5.0) -> None:
         await self._on_primary(lambda link: link.identify(seconds), "identify")
@@ -927,7 +1035,7 @@ class DeviceManager:
                     try:
                         link = await device.add_transport(build_transport(candidate))
                     except Exception as exc:
-                        log.debug("%s: reconnect to %s failed: %s",
+                        log.info("%s: reconnect to %s failed: %s",
                                   device.label, candidate.address, exc)
                         continue
                     self._attempts[serial] = 0

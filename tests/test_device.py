@@ -118,6 +118,28 @@ async def test_display_control(device):
     assert config["display"]["backlight"] == 55
 
 
+async def test_the_host_copy_follows_a_display_change(device, runtime):
+    """Without it, the next sync from the host's copy put old values back."""
+    await device.set_display(rotation=180, backlight=30)
+    assert device.config["display"]["rotation"] == 180   # at once, before any answer
+    await asyncio.sleep(0.1)
+    assert device.config["display"] == runtime.board.config["display"]
+
+
+async def test_an_unsolicited_config_is_adopted(device):
+    """DISPLAY_SET is fire-and-forget, so the board's CONFIG answer to it
+    arrives unsolicited. It used to be dropped."""
+    from tjiptemp.protocol import messages as M
+    from tjiptemp.protocol.framing import Frame
+
+    events = []
+    device.subscribe(lambda event: events.append(event.kind))
+    config = {**device.config, "display": {**device.config["display"], "page": "blank"}}
+    device._on_unsolicited(Frame(M.Msg.CONFIG, M.json_payload(config)), None)
+    assert device.config["display"]["page"] == "blank"
+    assert "config" in events
+
+
 async def test_self_test_reports_per_check_results(device):
     result = await device.run_self_test()
     assert "checks" in result
@@ -369,6 +391,154 @@ async def test_a_slow_handshake_does_not_reopen_the_port(runtime, monkeypatch):
         await dev.close()
 
 
+async def test_a_hello_lost_to_a_boot_is_sent_again_on_the_open_port(runtime, monkeypatch):
+    """A board still booting when the port opens never hears the first HELLO.
+
+    That HELLO used to wait the link's 12 s default -- the whole handshake
+    window -- so one lost HELLO meant a 12 s hang and then a failure, and the
+    retry never got a turn. It is sent again instead, on the port already open.
+    """
+    import time
+
+    from tjiptemp.device import device as D
+
+    monkeypatch.setattr(D, "HELLO_TIMEOUT_S", 0.2)
+    real = runtime.handle_bytes
+    booted_at = time.monotonic() + 0.5
+
+    def booting(session_id, data, reader):
+        if time.monotonic() >= booted_at:
+            real(session_id, data, reader)
+
+    runtime.handle_bytes = booting
+    transport = LoopbackTransport(runtime)
+    opens = 0
+    real_open = transport.open
+
+    async def counting_open() -> None:
+        nonlocal opens
+        opens += 1
+        await real_open()
+
+    transport.open = counting_open
+
+    dev = Device()
+    started = time.monotonic()
+    try:
+        await dev.add_transport(transport, start_stream=False)
+        assert dev.state is DeviceState.ONLINE
+        assert time.monotonic() - started < 2.0
+        assert opens == 1, "the port was reopened to send HELLO again"
+    finally:
+        await dev.close()
+
+
+async def test_a_late_answer_to_an_earlier_hello_still_counts(runtime, monkeypatch):
+    """Sending HELLO again must not abandon the ones already out.
+
+    A busy board answers late. If each resend threw away the HELLO before it,
+    a board slower than the resend interval would never connect at all.
+    """
+    import time
+
+    from tjiptemp.device import device as D
+    from tjiptemp.device.link import Link
+
+    monkeypatch.setattr(D, "HELLO_TIMEOUT_S", 0.1)
+    calls = 0
+    real_hello = Link.hello
+
+    async def slow_hello(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.35)
+        return await real_hello(self, *args, **kwargs)
+
+    monkeypatch.setattr(Link, "hello", slow_hello)
+    dev = Device()
+    started = time.monotonic()
+    try:
+        await dev.add_transport(LoopbackTransport(runtime), start_stream=False)
+        assert dev.state is DeviceState.ONLINE
+        assert time.monotonic() - started < 2.0
+        assert 2 <= calls <= 6, "HELLO should have been re-sent while the first was out"
+    finally:
+        await dev.close()
+
+
+async def test_find_usb_boards_does_not_wait_for_the_network(monkeypatch, tmp_path):
+    """It used to run the mDNS browse as well: three seconds of waiting for
+    results it then threw away."""
+    from tjiptemp.core import application as A
+    from tjiptemp.transport import discovery
+
+    browsed = []
+
+    async def browse(*_args, **_kwargs):
+        browsed.append(True)
+        return []
+
+    monkeypatch.setattr(discovery, "discover_mdns", browse)
+    monkeypatch.setattr(A, "discover_serial", lambda **_kwargs: [])
+    app = A.Application(A.Settings(), db_path=tmp_path / "recordings.tjip")
+    try:
+        assert await app.auto_connect() == []
+        assert not browsed
+    finally:
+        await app.close()
+
+
+async def test_a_board_that_never_sends_its_simulator_table_connects_anyway(runtime, monkeypatch):
+    """The DIN-6 dropped its SIM_CAL reply (too big for a frame), and waiting
+    for it held every connect for the whole 15 s timeout. It is fetched after
+    going online now, not before."""
+    import time
+
+    from tjiptemp.device.link import Link
+
+    async def never(self, *args, **kwargs):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(Device, "has_simulator", property(lambda self: True))
+    monkeypatch.setattr(Link, "get_sim_cal", never)
+    dev = Device()
+    started = time.monotonic()
+    try:
+        await dev.add_transport(LoopbackTransport(runtime), start_stream=False)
+        assert dev.state is DeviceState.ONLINE
+        assert time.monotonic() - started < 3.0
+    finally:
+        await dev.close()
+
+
+async def test_a_second_connect_to_the_same_port_joins_the_first(runtime, monkeypatch, tmp_path):
+    """Clicking again during a slow connect opened the port a second time, and
+    that failed as "already open in another program" -- the other program being
+    this one, which was connecting fine."""
+    from tjiptemp.core import application as A
+    from tjiptemp.transport.discovery import Candidate
+
+    built = []
+
+    def build(candidate):
+        transport = LoopbackTransport(runtime)
+        transport.info.kind, transport.info.address = candidate.kind, candidate.address
+        built.append(transport)
+        return transport
+
+    monkeypatch.setattr(A, "build_transport", build)
+    app = A.Application(A.Settings(), db_path=tmp_path / "recordings.tjip")
+    port = Candidate("usb", "/dev/ttyACM9", "test port")
+    try:
+        first, second = await asyncio.gather(app.connect(port), app.connect(port))
+        assert first is second
+        assert len(built) == 1
+        assert await app.connect(port) is first     # already connected: no new port
+        assert len(built) == 1
+    finally:
+        await app.close()
+
+
 # --------------------------------------------- the board's settings win
 
 async def test_connecting_adopts_the_boards_own_sample_rate(runtime):
@@ -427,6 +597,9 @@ async def test_connecting_reads_the_simulator_table_the_board_already_has(
     dev = Device()
     try:
         await dev.add_transport(LoopbackTransport(runtime), start_stream=False)
+        # Asked right after going online rather than before, so a board that
+        # never answers cannot hold the connect for the whole timeout.
+        await asyncio.sleep(0.05)
         assert asked == 1
         assert dev.sim_cal["generation"] == 3
     finally:

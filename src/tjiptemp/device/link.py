@@ -190,6 +190,9 @@ class Link:
             raise
         try:
             return await asyncio.wait_for(pending.future, timeout)
+        except asyncio.CancelledError:
+            self._pending.pop(seq, None)
+            raise
         except TimeoutError as exc:
             self._pending.pop(seq, None)
             name = M.MSG_NAMES.get(frame.msg_type, hex(frame.msg_type))
@@ -213,8 +216,9 @@ class Link:
 
     # ------------------------------------------------------- protocol helpers
 
-    async def hello(self, host_name: str = "tjiptemp-host") -> dict:
-        return await self.request_json(M.hello(host_name))
+    async def hello(self, host_name: str = "tjiptemp-host", *,
+                    timeout: float = DEFAULT_TIMEOUT_S) -> dict:
+        return await self.request_json(M.hello(host_name), timeout=timeout)
 
     async def get_config(self) -> dict:
         return await self.request_json(M.get_config())

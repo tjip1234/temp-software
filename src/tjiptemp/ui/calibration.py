@@ -368,7 +368,7 @@ class CalibrationPanel(QWidget):
 
     def _clear_plot(self) -> None:
         self.residual_plot.clear()
-        self.residual_plot.addLine(y=0, pen=pg.mkPen(self.theme.text_muted, width=1))
+        self.residual_plot.addLine(y=0, pen=pg.mkPen(self.theme.display_dim, width=1))
 
     def _refit(self) -> None:
         spec = self.current_spec
@@ -440,7 +440,7 @@ class CalibrationPanel(QWidget):
         residuals_mk = result.residuals * 1000.0
         scatter = pg.ScatterPlotItem(
             x=result.reference, y=residuals_mk, size=9,
-            brush=pg.mkBrush(self.theme.accent), pen=pg.mkPen(self.theme.surface_sunken, width=2),
+            brush=pg.mkBrush(self.theme.display_text), pen=pg.mkPen(self.theme.display, width=2),
         )
         self.residual_plot.addItem(scatter)
         if residuals_mk.size:

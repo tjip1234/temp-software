@@ -217,7 +217,7 @@ class SessionBrowser(QWidget):
         preview_layout.setContentsMargins(0, 6, 0, 0)
         self.plot = pg.PlotWidget(axisItems={"bottom": TimeAxis(orientation="bottom")})
         self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self.plot.addLegend(offset=(8, 6), labelTextColor=theme.text_secondary)
+        self.plot.addLegend(offset=(8, 6), labelTextColor=theme.display_label)
         preview_layout.addWidget(self.plot, 2)
 
         self.stats = QTableWidget(0, 0)
@@ -306,7 +306,7 @@ class SessionBrowser(QWidget):
             spec = spec_for(cid)
             column = values[:, ids.index(cid)]
             t_dec, v_dec = DecimatingView.decimate(times, column, 3000)
-            color = spec.color_dark if self.theme.dark else spec.color
+            color = self.theme.series_color(spec)
             pen = pg.mkPen(color, width=1.5,
                            style=Qt.PenStyle.DashLine if spec.dash == "dashed"
                            else Qt.PenStyle.SolidLine)

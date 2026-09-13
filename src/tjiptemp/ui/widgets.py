@@ -221,7 +221,8 @@ class ChannelTable(QTableWidget):
         theme = self._theme
         for row, spec in enumerate(self._specs):
             self._rows[spec.id] = row
-            color = spec.color_dark if (theme and theme.dark) else spec.color
+            # The table is a display box in both themes, like the plots.
+            color = theme.series_color(spec) if theme else spec.color_dark
 
             # Tick box plus colour swatch, so the row says both "is this plotted?"
             # and "which line is it?" without the user consulting the legend.
@@ -242,8 +243,9 @@ class ChannelTable(QTableWidget):
 
             name = QTableWidgetItem(spec.name)
             name.setToolTip(f"{spec.key} · channel {spec.id} · {spec.kind}")
-            if spec.secondary and theme:
-                name.setForeground(QColor(theme.text_secondary))
+            if theme:
+                name.setForeground(QColor(
+                    theme.display_dim if spec.secondary else theme.display_label))
             self.setItem(row, 1, name)
 
             value = QTableWidgetItem("—")
@@ -252,8 +254,12 @@ class ChannelTable(QTableWidget):
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
             self.setItem(row, 2, value)
-            self.setItem(row, 3, QTableWidgetItem(unit_symbol(spec.unit)))
+            unit = QTableWidgetItem(unit_symbol(spec.unit))
+            self.setItem(row, 3, unit)
             age = QTableWidgetItem("")
+            if theme:
+                unit.setForeground(QColor(theme.display_label))
+                age.setForeground(QColor(theme.display_dim))
             age.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.setItem(row, 4, age)
             self.setRowHeight(row, 24)
@@ -273,7 +279,7 @@ class ChannelTable(QTableWidget):
             if not math.isfinite(value):
                 cell.setText("fault")
                 if theme:
-                    cell.setForeground(QColor(theme.critical))
+                    cell.setForeground(QColor(theme.display_critical))
                 age_cell.setText("")
                 continue
 
@@ -284,7 +290,7 @@ class ChannelTable(QTableWidget):
                 # A stale reading is dimmed rather than hidden: the last good value
                 # with its age is more useful than a dash.
                 stale = age > 3.0
-                cell.setForeground(QColor(theme.text_muted if stale else theme.text_primary))
+                cell.setForeground(QColor(theme.display_dim if stale else theme.display_text))
             age_cell.setText("" if age < 3.0 else f"{age:.0f}s ago")
 
     def set_checked(self, channel_ids: set[int]) -> None:
@@ -300,13 +306,17 @@ class MetricLabel(QWidget):
     def __init__(self, caption: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(8, 3, 8, 4)
         layout.setSpacing(0)
+        self.setObjectName("metric")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._caption = QLabel(caption)
         self._value = QLabel("—")
         font = self._value.font()
         font.setPointSizeF(font.pointSizeF() + 1)
         font.setWeight(QFont.Weight.DemiBold)
+        font.setFamily("monospace")
+        font.setStyleHint(QFont.StyleHint.Monospace)
         self._value.setFont(font)
         caption_font = self._caption.font()
         caption_font.setPointSizeF(max(8.0, caption_font.pointSizeF() - 2))
@@ -315,8 +325,13 @@ class MetricLabel(QWidget):
         layout.addWidget(self._value)
 
     def set_theme(self, theme: Theme) -> None:
-        self._caption.setStyleSheet(f"color: {theme.text_muted};")
-        self._value.setStyleSheet(f"color: {theme.text_primary};")
+        # A readout is a display box: tan caption, yellow value, on black.
+        self.setStyleSheet(
+            f"#metric {{ background: {theme.display}; border: 1px solid {theme.display_border};"
+            f"border-radius: 2px; }}"
+        )
+        self._caption.setStyleSheet(f"color: {theme.display_dim}; background: transparent;")
+        self._value.setStyleSheet(f"color: {theme.display_text}; background: transparent;")
 
     def set_value(self, text: str, tooltip: str = "") -> None:
         self._value.setText(text)

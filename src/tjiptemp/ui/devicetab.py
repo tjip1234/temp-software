@@ -553,8 +553,8 @@ class DeviceTab(QWidget):
         self.diag_label.setWordWrap(True)
         self.diag_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.diag_label.setStyleSheet(
-            f"background: {self.theme.surface_sunken}; border: 1px solid {self.theme.border};"
-            f"border-radius: 6px; padding: 8px; color: {self.theme.text_secondary};"
+            f"background: {self.theme.display}; border: 1px solid {self.theme.display_border};"
+            f"border-radius: 2px; padding: 8px; color: {self.theme.display_label};"
         )
         layout.addWidget(self.diag_label, 1)
 

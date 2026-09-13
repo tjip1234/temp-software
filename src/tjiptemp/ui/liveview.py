@@ -90,18 +90,18 @@ class GroupPlot(pg.PlotWidget):
         self.setClipToView(True)
         self.setDownsampling(auto=False)   # we decimate ourselves, truthfully
 
-        legend = self.addLegend(offset=(8, 6), labelTextColor=theme.text_secondary)
-        legend.setBrush(pg.mkBrush(QColor(theme.surface_raised)))
-        legend.setPen(pg.mkPen(QColor(theme.border)))
+        legend = self.addLegend(offset=(8, 6), labelTextColor=theme.display_label)
+        legend.setBrush(pg.mkBrush(QColor(theme.display_raised)))
+        legend.setPen(pg.mkPen(QColor(theme.display_border)))
         self._legend = legend
 
         self._crosshair_v = pg.InfiniteLine(angle=90, movable=False,
-                                            pen=pg.mkPen(theme.text_muted, width=1,
+                                            pen=pg.mkPen(theme.display_dim, width=1,
                                                          style=Qt.PenStyle.DashLine))
         self.addItem(self._crosshair_v, ignoreBounds=True)
         self._crosshair_v.hide()
 
-        self._readout = pg.TextItem(anchor=(0, 1), color=theme.text_primary)
+        self._readout = pg.TextItem(anchor=(0, 1), color=theme.display_text)
         font = QFont("monospace")
         font.setStyleHint(QFont.StyleHint.Monospace)
         font.setPointSizeF(9)
@@ -119,7 +119,7 @@ class GroupPlot(pg.PlotWidget):
             self._legend.setColumnCount(max(1, columns))
 
     def add_channel(self, spec: ChannelSpec) -> None:
-        color = spec.color_dark if self.theme.dark else spec.color
+        color = self.theme.series_color(spec)
         pen = pg.mkPen(
             color=color,
             width=1.6 if spec.dash == "solid" else 1.3,

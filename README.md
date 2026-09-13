@@ -62,6 +62,18 @@ on a recent distribution will not start on an older one. Build on the oldest
 distribution you intend to support; the release workflow uses Ubuntu 22.04 for
 this reason.
 
+Ubuntu 22.04 ships glibc 2.35, which is the floor the release AppImage
+supports; the bundled PySide6 6.11 wheels need 2.34, so they fit under it. Two
+things to know about keeping that floor:
+
+- GitHub deprecates the `ubuntu-22.04` hosted runner from 2026-09-17, with
+  brownouts that fail jobs, and removes it on 2027-04-17. Switching the package
+  job to `ubuntu-latest` would silently raise the floor to 24.04 (glibc 2.39);
+  run the build in an `ubuntu:22.04` container instead.
+- `build_appimage.sh` reads the version with `tomllib`, which needs Python
+  3.11+. A stock 22.04 has 3.10, so building locally there needs a newer Python
+  via `PYTHON=`.
+
 **From source, any platform**
 
 ```sh

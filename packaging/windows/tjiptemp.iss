@@ -2,7 +2,7 @@
 ; Built by packaging\windows\build.ps1; needs Inno Setup 6.
 
 #define AppName "TjipTemp"
-#define AppVersion "0.1.0"
+#define AppVersion "0.2.0"
 #define AppPublisher "TjipTemp"
 #define AppURL "https://github.com/tjiptemp/tjiptemp"
 #define AppExeName "tjiptemp.exe"

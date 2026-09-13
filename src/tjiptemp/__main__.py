@@ -161,7 +161,11 @@ async def run_list() -> int:
         return 1
     print(f"{'KIND':<6} {'ADDRESS':<28} DETAIL")
     for candidate in candidates:
-        print(f"{candidate.kind.upper():<6} {candidate.address:<28} {candidate.label}")
+        # Every serial candidate uses the "usb" transport, but a motherboard UART
+        # is not a USB device and should not be listed as one.
+        hwid = str(candidate.detail.get("hwid", "USB"))
+        kind = "SERIAL" if candidate.kind == "usb" and not hwid.startswith("USB") else candidate.kind.upper()
+        print(f"{kind:<6} {candidate.address:<28} {candidate.label}")
     print("\nA port is only confirmed as a board once it answers, so try connecting.")
     return 0
 

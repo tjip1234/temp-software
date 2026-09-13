@@ -238,6 +238,10 @@ def list_serial_candidates(*, all_ports: bool = False) -> list[dict]:
         elif vid_pid in BRIDGE_IDS:
             rank, why = 2, "USB-serial bridge"
         elif all_ports:
+            # Linux lists every 8250 UART the kernel reserved a node for, most of
+            # which have no hardware behind them; pyserial marks those "n/a".
+            if (port.hwid or "n/a") == "n/a":
+                continue
             rank, why = 3, "serial port"
         else:
             continue

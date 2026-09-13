@@ -665,6 +665,29 @@ async def test_a_board_without_a_simulator_is_not_asked_for_a_table(runtime, mon
 
 # ---------------------------------------------------------------- reindexing
 
+def test_listing_all_ports_skips_uarts_with_no_hardware(monkeypatch):
+    """--list used to print /dev/ttyS0..31 on any Linux PC: placeholder nodes."""
+    from types import SimpleNamespace
+
+    from tjiptemp.transport import serial_cdc
+
+    def port(device, vid=None, pid=None, hwid="n/a"):
+        return SimpleNamespace(device=device, vid=vid, pid=pid, hwid=hwid, description="n/a",
+                               manufacturer=None, serial_number=None)
+
+    ports = [
+        port("/dev/ttyACM0", 0x303A, 0x1001, "USB VID:PID=303A:1001"),
+        port("/dev/ttyACM1", 0x04B4, 0x0008, "USB VID:PID=04B4:0008"),
+        port("/dev/ttyS0"),
+        port("/dev/ttyS4", hwid="PNP0501"),
+    ]
+    monkeypatch.setattr(serial_cdc.list_ports, "comports", lambda: ports)
+
+    listed = [c["port"] for c in serial_cdc.list_serial_candidates(all_ports=True)]
+    assert listed == ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyS4"]
+    assert [c["port"] for c in serial_cdc.list_serial_candidates()] == ["/dev/ttyACM0"]
+
+
 def test_reindex_maps_columns_and_nans_the_missing_ones():
     """A board that reports a subset, or a different order, must still land in
     the canonical columns — with absent channels NaN rather than zero."""

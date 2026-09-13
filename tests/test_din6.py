@@ -187,6 +187,46 @@ def test_panel_shows_the_sweep_error(qt_app_or_skip):
         panel.deleteLater()
 
 
+def test_panel_says_when_the_table_cannot_reach_the_clamp(qt_app_or_skip):
+    """Numbers from a real DIN-6 sweep: the network tops out at 1736.9 ohm.
+
+    That is about 194 C, so the 200 C verification point came back at 194.15 C
+    and the panel called it a -5.85 C error, while the clamp still allowed 240 C.
+    """
+    from tjiptemp.device.device import Device
+    from tjiptemp.ui.simpanel import SimulatorPanel, table_range_c
+    from tjiptemp.ui.theme import resolve
+
+    device = Device(serial="TJIP-SIMTEST0002", name="probe")
+    device.info = {"caps": {"sim": {"pt1000_out": True}}}
+    device.config = {"sim": {"source": 1, "tau_s": 4, "limits": {"min_c": -50, "max_c": 240}}}
+    device.sim_cal = {
+        "valid": True, "rev": 10, "ntc_rtd_c": 27.97, "n_usable": 256,
+        "r_min": 100.39, "r_max": 1736.90,
+        "last_sweep": {"ok": True, "elapsed_ms": 18250, "verify": [
+            {"target_c": 0, "actual_c": -0.45},
+            {"target_c": 100, "actual_c": 100.32},
+            {"target_c": 150, "actual_c": 150.07},
+            {"target_c": 200, "actual_c": 194.15},
+        ]},
+    }
+    top = table_range_c(device.sim_cal)[1]
+    assert 193.5 < top < 195.0
+
+    panel = SimulatorPanel(device, resolve("light"))
+    try:
+        panel.refresh()
+        table = panel.table_label.text()
+        assert "reaches up to 194" in table
+        assert "240" in table, "must say the clamp allows more than the table delivers"
+        verify = panel.verify_label.text().splitlines()
+        assert "error -0.45" in verify[1]
+        assert "beyond the table" in verify[4] and "error" not in verify[4]
+    finally:
+        panel.close_panel()
+        panel.deleteLater()
+
+
 @pytest.fixture
 def qt_app_or_skip():
     """A QApplication for the widget-level checks, or skip without PySide6."""

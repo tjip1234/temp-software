@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from ..device.device import Device, DeviceEvent
 from ..protocol.channels import Ch
+from ..sensors.rtd import temperature as pt1000_temperature
 from .theme import Theme
 from .widgets import alive
 
@@ -73,6 +75,22 @@ SWEEP_ERRORS = {
     "out_of_memory":
         "the board did not have enough memory to run the sweep.",
 }
+
+
+def table_range_c(table: dict) -> tuple[float, float] | None:
+    """The temperatures a wiper table can actually produce, from its ohm range.
+
+    The digipot network has a finite top resistance, so a table measured on a real
+    board stops short of what the clamp allows: on the DIN-6 it tops out near
+    194 °C. Anything asked for above that is driven at the top code.
+    """
+    r_min, r_max = table.get("r_min"), table.get("r_max")
+    if r_min is None or r_max is None:
+        return None
+    lo, hi = float(pt1000_temperature(r_min)), float(pt1000_temperature(r_max))
+    if not (math.isfinite(hi)):
+        return None
+    return (lo if math.isfinite(lo) else float("-inf")), hi
 
 
 class SimulatorPanel(QWidget):
@@ -338,7 +356,21 @@ class SimulatorPanel(QWidget):
                 parts.append(f"{usable} usable codes")
             if table.get("r_min") is not None:
                 parts.append(f"{table['r_min']:.0f}–{table['r_max']:.0f} Ω")
-            self.table_label.setText(", ".join(parts) + ".")
+            text = ", ".join(parts) + "."
+            tone = self.theme.text_primary
+            reach = table_range_c(table)
+            if reach is not None:
+                text += f" It reaches up to {reach[1]:.1f} °C."
+                clamp = ((self.device.config or {}).get("sim") or {}).get("limits") or {}
+                max_c = clamp.get("max_c")
+                if max_c is not None and float(max_c) > reach[1] + 0.5:
+                    text += (
+                        f" The clamp allows {float(max_c):.0f} °C, so anything asked "
+                        f"for above {reach[1]:.1f} °C is driven at {reach[1]:.1f} °C."
+                    )
+                    tone = self.theme.warning
+            self.table_label.setText(text)
+            self.table_label.setStyleSheet(f"color: {tone};")
 
         now = sim.get("ntc_rtd_c")
         drift = sim.get("drift_c")
@@ -382,12 +414,17 @@ class SimulatorPanel(QWidget):
             return
         self.verify_label.setStyleSheet(f"color: {self.theme.text_secondary};")
         lines = ["Last sweep checked itself against:"]
+        reach = table_range_c(self.device.sim_cal or {})
         for point in points:
             err = point["actual_c"] - point["target_c"]
-            lines.append(
-                f"  {point['target_c']:7.1f} °C  →  {point['actual_c']:7.2f} °C"
-                f"   error {err:+.2f} °C"
-            )
+            line = f"  {point['target_c']:7.1f} °C  →  {point['actual_c']:7.2f} °C"
+            if reach is not None and not reach[0] <= point["target_c"] <= reach[1]:
+                # Not an error in the table: the target is past what the network
+                # can produce, and the board drove the nearest end of it.
+                line += "   beyond the table's range"
+            else:
+                line += f"   error {err:+.2f} °C"
+            lines.append(line)
         self.verify_label.setText("\n".join(lines))
 
     # ----------------------------------------------------------------- actions

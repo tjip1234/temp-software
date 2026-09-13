@@ -42,6 +42,10 @@ RTT_OUTLIER_FACTOR = 4.0
 MIN_FOR_FIT = 4
 #: Below this many, or before any sync, we are in "estimated" mode.
 MIN_FOR_DRIFT = 8
+#: And the exchanges must span at least this much device time. The connect burst
+#: is eight syncs 50 ms apart: fitting a slope to 0.4 s of data reported a
+#: crystal 25 ppm off on a board whose true error was under one.
+MIN_SPAN_FOR_DRIFT_S = 60.0
 
 
 @dataclass(slots=True)
@@ -82,6 +86,8 @@ class TimebaseFit:
     rtt_median_ns: float = 0.0
     residual_rms_ns: float = 0.0
     fitted_at: float = 0.0
+    #: Whether the slope was fitted, as opposed to assumed perfect.
+    drift_fitted: bool = False
 
     @property
     def drift_ppm(self) -> float:
@@ -104,7 +110,7 @@ class TimebaseFit:
         return {
             "slope_ns_per_us": self.slope,
             "intercept_ns": self.intercept,
-            "drift_ppm": round(self.drift_ppm, 3),
+            "drift_ppm": round(self.drift_ppm, 3) if self.drift_fitted else None,
             "n_points": self.n_points,
             "rtt_median_us": round(self.rtt_median_ns / 1000.0, 1),
             "residual_rms_us": round(self.residual_rms_ns / 1000.0, 1),
@@ -192,7 +198,9 @@ class Timebase:
         sxx = sum(w * (x - mean_x) ** 2 for x, _, w in points)
         sxy = sum(w * (x - mean_x) * (y - mean_y) for x, y, w in points)
 
-        if sxx <= 0 or n < MIN_FOR_DRIFT:
+        span_s = (max(x for x, _, _ in points) - min(x for x, _, _ in points)) / 1e6
+        drift_fitted = False
+        if sxx <= 0 or n < MIN_FOR_DRIFT or span_s < MIN_SPAN_FOR_DRIFT_S:
             # Not enough time span to separate drift from offset. Assume a perfect
             # clock and fit the offset only -- an honest slope needs minutes of data,
             # and a slope fitted to seconds of data is worse than no slope at all.
@@ -204,6 +212,8 @@ class Timebase:
             # bad fit, not a bad crystal, so fall back rather than propagate nonsense.
             if abs(slope / NS_PER_US - 1.0) > 200e-6:
                 slope = NS_PER_US
+            else:
+                drift_fitted = True
             intercept = mean_y - slope * mean_x
 
         residuals = [y - (slope * x + intercept) for x, y, _ in points]
@@ -216,6 +226,7 @@ class Timebase:
             rtt_median_ns=rtt_median,
             residual_rms_ns=rms,
             fitted_at=time.monotonic(),
+            drift_fitted=drift_fitted,
         )
 
     # -------------------------------------------------------------- conversion
@@ -257,7 +268,7 @@ class Timebase:
         f = self.fit
         if f.n_points == 0:
             return "Time: estimated from arrival (no sync yet)"
-        if f.n_points < MIN_FOR_DRIFT:
+        if not f.drift_fitted:
             return f"Time: ±{f.uncertainty_ns / 1000:.0f} µs, offset only ({f.n_points} syncs)"
         return (
             f"Time: ±{f.uncertainty_ns / 1000:.0f} µs, drift {f.drift_ppm:+.1f} ppm "

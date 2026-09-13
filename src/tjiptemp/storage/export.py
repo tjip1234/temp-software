@@ -172,7 +172,9 @@ def metadata_rows(info: SessionInfo, specs: list[ChannelSpec], frame: pd.DataFra
     ]
     if tb:
         rows += [
-            ("Clock drift", f"{tb.get('drift_ppm', 0):+.2f} ppm"),
+            # None when the session was too short to separate drift from offset.
+            ("Clock drift", "not measured" if tb.get("drift_ppm") is None
+             else f"{tb['drift_ppm']:+.2f} ppm"),
             ("Timestamp uncertainty", f"±{tb.get('uncertainty_us', 0):.0f} µs"),
             ("Time sync points", str(tb.get("n_points", 0))),
         ]

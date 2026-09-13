@@ -262,6 +262,18 @@ def spec_for(channel_id: int) -> ChannelSpec:
     )
 
 
+def spec_lookup(info: dict | None):
+    """A channel-id -> spec function for data recorded from the board in ``info``.
+
+    The board's own DEVICE_INFO names its channels; the built-in table is only a
+    fallback for ids it did not declare. Labelling a recording from the built-in
+    table alone calls the DIN-6's channel 8 "Board: charger" -- a name from the
+    earlier board -- where the DIN-6 means its power area.
+    """
+    declared = specs_from_device_info(info or {})
+    return lambda cid: declared.get(cid) or spec_for(cid)
+
+
 def specs_from_device_info(info: dict) -> dict[int, ChannelSpec]:
     """Build the channel table a connected device declares.
 

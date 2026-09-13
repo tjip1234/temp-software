@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.ringbuffer import DecimatingView
-from ..protocol.channels import spec_for
+from ..protocol.channels import spec_lookup
 from ..storage.db import Database, SessionInfo
 from ..storage.export import EXPORTERS, ExportOptions, export, summary_table
 from .liveview import AXIS_GROUP, TimeAxis
@@ -294,6 +294,8 @@ class SessionBrowser(QWidget):
             self.plot.setTitle("No data")
             return
 
+        # Named as the board that recorded it named its channels.
+        spec_for = spec_lookup(self.db.device_info(info.device_serial))
         groups: dict[str, list[int]] = {}
         for cid in ids:
             spec = spec_for(cid)

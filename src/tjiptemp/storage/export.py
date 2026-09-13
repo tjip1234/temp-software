@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ..protocol.channels import ChannelSpec, spec_for
+from ..protocol.channels import ChannelSpec, spec_lookup
 from .db import Database, SessionInfo
 
 UNIT_LABELS = {
@@ -91,7 +91,8 @@ def load_frame(
         )
 
     wanted = options.channels or channel_ids
-    specs = [spec_for(cid) for cid in channel_ids if cid in set(wanted)]
+    spec = spec_lookup(db.device_info(info.device_serial))
+    specs = [spec(cid) for cid in channel_ids if cid in set(wanted)]
     columns = {}
     for spec in specs:
         col = values[:, channel_ids.index(spec.id)].astype(np.float64)

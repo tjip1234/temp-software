@@ -225,6 +225,32 @@ def test_csv_export_carries_provenance(db, populated, tmp_path):
     assert any(",," in line for line in body)
 
 
+def test_export_names_channels_as_the_recording_board_did(db, tmp_path):
+    """The DIN-6's channel 8 is its power area; the built-in table calls id 8 the
+    charger thermistor of the earlier board, and exports used to say so."""
+    db.upsert_device("TJIP-DIN6", {"model": "tjiptemp-din6", "channels": [
+        {"id": 0, "key": "pt1000", "name": "PT1000", "unit": "degC", "kind": "rtd"},
+        {"id": 8, "key": "ntc_brd_pwr", "name": "Board: power area", "unit": "degC", "kind": "ntc"},
+    ]})
+    session = db.create_session("TJIP-DIN6", [0, 8], name="din6", rate_hz=20.0)
+    values = np.column_stack([np.full(20, 25.6), np.full(20, 31.4)]).astype(np.float32)
+    db.append_blocks(session, [pack_block(0, values, t0_utc=1_800_000_000.0, dt_s=0.05)])
+    db.close_session(session)
+
+    text = to_csv(db, session, tmp_path / "din6.csv").read_text(encoding="utf-8")
+    assert "Board: power area [°C]" in text
+    assert "charger" not in text
+
+
+def test_a_board_that_declared_no_channels_falls_back_to_the_built_in_names(db, tmp_path):
+    db.upsert_device("TJIP-OLDFW", {"model": "tjiptemp-s3", "fw_ver": "0.0.9"})
+    session = db.create_session("TJIP-OLDFW", [0], name="orphan", rate_hz=10.0)
+    db.append_blocks(session, [pack_block(0, np.full((5, 1), 20.0, np.float32),
+                                          t0_utc=1_800_000_000.0, dt_s=0.1)])
+    db.close_session(session)
+    assert "PT1000 [°C]" in to_csv(db, session, tmp_path / "orphan.csv").read_text(encoding="utf-8")
+
+
 def test_csv_export_honours_a_time_range(db, populated, tmp_path):
     options = ExportOptions(t_from=1_800_000_005.0, t_to=1_800_000_010.0)
     path = to_csv(db, populated, tmp_path / "slice.csv", options)

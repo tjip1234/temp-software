@@ -456,11 +456,13 @@ def build_app(app: Application) -> FastAPI:
         columns = [(cid, ids.index(cid)) for cid in wanted if cid in ids]
 
         if format == "csv":
-            from ..protocol.channels import spec_for
+            from ..protocol.channels import spec_lookup
+
+            spec = spec_lookup(app.db.device_info(info.device_serial))
 
             def rows():
                 header = ["timestamp_utc"] + [
-                    f"{spec_for(cid).name} [{spec_for(cid).unit}]" for cid, _ in columns
+                    f"{spec(cid).name} [{spec(cid).unit}]" for cid, _ in columns
                 ]
                 yield ",".join(header) + "\n"
                 for index in range(len(times)):

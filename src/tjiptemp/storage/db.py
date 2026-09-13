@@ -261,6 +261,18 @@ class Database:
                  info.get("hw_rev", ""), info.get("fw_ver", ""), now, now, json.dumps(info)),
             )
 
+    def device_info(self, serial: str) -> dict:
+        """The DEVICE_INFO last stored for a board, or {} if it was never seen."""
+        row = self._conn.execute(
+            "SELECT info_json FROM devices WHERE serial = ?", (serial,)
+        ).fetchone()
+        if row is None or not row["info_json"]:
+            return {}
+        try:
+            return json.loads(row["info_json"])
+        except ValueError:
+            return {}
+
     def list_devices(self) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM devices ORDER BY last_seen DESC"

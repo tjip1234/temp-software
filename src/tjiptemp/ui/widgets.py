@@ -277,9 +277,13 @@ class ChannelTable(QTableWidget):
             age_cell = self.item(row, 4)
 
             if not math.isfinite(value):
-                cell.setText("fault")
+                # A thermistor input reads NaN when nothing is plugged into it,
+                # which is not a fault. The converter-backed channels (PT1000,
+                # thermocouple) only go NaN on a real fault the chip reported.
+                absent = spec.kind == "ntc"
+                cell.setText("no probe" if absent else "fault")
                 if theme:
-                    cell.setForeground(QColor(theme.display_critical))
+                    cell.setForeground(QColor(theme.display_dim if absent else theme.display_critical))
                 age_cell.setText("")
                 continue
 

@@ -95,7 +95,10 @@ def test_reader_resyncs_after_garbage():
     reader = FrameReader()
     frames = reader.feed(junk + good + junk + also_good)
     assert [f.payload for f in frames] == [b"one", b"two"]
-    assert reader.bad_frames == 2
+    # The leading junk is what a port hands over when opened mid-frame, on nearly
+    # every connect; only the junk between two good frames says the link is bad.
+    assert reader.bad_frames == 1
+    assert reader.dropped_bytes == 6
 
 
 def test_reader_handles_byte_at_a_time_delivery():

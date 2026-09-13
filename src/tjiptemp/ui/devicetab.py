@@ -815,9 +815,16 @@ class DeviceTab(QWidget):
         if self.sim_panel is not None or not self.device.has_simulator:
             return
         self.sim_panel = SimulatorPanel(self.device, self.theme)
+        # Scrollable like the Sensors tab: the panel is taller than the side
+        # column of a normal window, and squeezed into it the wiper-table text
+        # was drawn over itself.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(self.sim_panel)
         # Second, right after Channels: on this board the simulator is the
         # point, not an accessory.
-        self.side.insertTab(1, self.sim_panel, "Simulator")
+        self.side.insertTab(1, scroll, "Simulator")
 
     def _open_wifi(self) -> None:
         dialog = WifiDialog(self.device, self.theme, self)

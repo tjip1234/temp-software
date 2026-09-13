@@ -227,6 +227,30 @@ def test_panel_says_when_the_table_cannot_reach_the_clamp(qt_app_or_skip):
         panel.deleteLater()
 
 
+def test_an_empty_thermistor_input_is_not_called_a_fault(qt_app_or_skip):
+    """The DIN-6 reads NaN on CN1-3 with nothing plugged in; that is no fault."""
+    import math
+
+    from tjiptemp.protocol.channels import ChannelSpec
+    from tjiptemp.ui.theme import resolve
+    from tjiptemp.ui.widgets import ChannelTable
+
+    specs = [
+        ChannelSpec(id=0, key="pt1000", name="PT1000", unit="degC", kind="rtd"),
+        ChannelSpec(id=3, key="ntc_ext1", name="NTC TEMP1", unit="degC", kind="ntc"),
+    ]
+    theme = resolve("light")
+    table = ChannelTable()
+    table.set_theme(theme)
+    table.rebuild(specs)
+    table.update_values({0: (math.nan, 0.0), 3: (math.nan, 0.0)})
+
+    assert table.item(0, 2).text() == "fault"
+    assert table.item(1, 2).text() == "no probe"
+    assert table.item(1, 2).foreground().color().name() == theme.display_dim
+    table.deleteLater()
+
+
 @pytest.fixture
 def qt_app_or_skip():
     """A QApplication for the widget-level checks, or skip without PySide6."""

@@ -218,7 +218,13 @@ class FrameReader:
                 frames.append(decode_frame(block))
                 self.good_frames += 1
             except FramingError:
-                self.bad_frames += 1
+                # Bytes before the first good frame are the tail of whatever was
+                # in flight when the port opened. That happens on nearly every
+                # connect and says nothing about the link, so it is dropped
+                # without being counted as a bad frame -- which the UI shows for
+                # the life of the connection.
+                if self.good_frames:
+                    self.bad_frames += 1
                 self.dropped_bytes += len(block)
         return frames
 

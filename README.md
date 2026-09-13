@@ -35,6 +35,7 @@ Three builds, one per platform, all from Releases:
 | Platform | File | Notes |
 |---|---|---|
 | Linux | `TjipTemp-<version>-x86_64.AppImage` | `chmod +x` it and run. No installation. |
+| Linux, any | `TjipTemp-<version>-anylinux-x86_64.AppImage` | Carries its own glibc, so it runs on any distribution, old or new. |
 | macOS | `TjipTemp-<version>.dmg` | Unsigned builds need right-click → Open once. |
 | Windows | `TjipTemp-Setup-<version>.exe` | Windows 10+ needs no driver: the board is a COM port. |
 
@@ -42,6 +43,7 @@ Building them yourself needs only Python and the platform's own toolchain:
 
 ```sh
 ./packaging/linux/build_appimage.sh          # dist/TjipTemp-<version>-<arch>.AppImage
+./packaging/linux/build_anylinux_appimage.sh # dist/TjipTemp-<version>-anylinux-<arch>.AppImage
 ./packaging/macos/build.sh                   # dist/TjipTemp-<version>.dmg
 powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1   # dist\*.exe
 ```

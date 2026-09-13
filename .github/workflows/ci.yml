@@ -128,10 +128,44 @@ jobs:
             dist/*.exe
           if-no-files-found: error
 
+  # A second Linux AppImage that carries its own glibc, so it runs on any
+  # distribution regardless of age. quick-sharun, which assembles it, is written
+  # for Arch, hence the official Arch image; the host's age does not matter here.
+  package-anylinux:
+    name: Package (AppImage, any Linux)
+    runs-on: ubuntu-latest
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    container: archlinux:latest
+    steps:
+      # Python, the tools quick-sharun calls (patchelf, strip, strings, wget),
+      # and the Qt runtime libraries the bundle links against: sharun can only
+      # deploy what is installed.
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --needed --noconfirm \
+            git base-devel wget patchelf python \
+            fontconfig dbus wayland krb5 mesa libglvnd \
+            libxkbcommon-x11 xcb-util-cursor xcb-util-image xcb-util-keysyms \
+            xcb-util-renderutil xcb-util-wm libxcomposite libxdamage \
+            libxinerama libxi libxcursor
+          python -m venv /opt/venv
+
+      - uses: actions/checkout@v4
+
+      - name: Build the AppImage
+        run: PYTHON=/opt/venv/bin/python ./packaging/linux/build_anylinux_appimage.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tjiptemp-AppImage-anylinux
+          path: dist/*.AppImage
+          if-no-files-found: error
+
   release:
     name: GitHub release
     runs-on: ubuntu-latest
-    needs: package
+    needs: [package, package-anylinux]
     # Only for a version tag. A manual run builds the three artifacts so they
     # can be checked, without publishing anything.
     if: startsWith(github.ref, 'refs/tags/v')

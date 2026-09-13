@@ -268,6 +268,42 @@ def test_aggregator_offers_gaps_for_backfill_after_a_grace_period():
     assert (due[0].first_seq, due[0].last_seq) == (10, 49)
 
 
+def test_a_gap_stays_due_while_the_stream_carries_on_past_it():
+    """One lost block must not freeze the live view.
+
+    A hole is followed by a steady stream of blocks. Each one used to re-note the
+    gap from next_seq, which replaced it with a fresh one: its grace period
+    restarted every block, so it was never requested, and every later block was
+    held behind it. On a real board that froze the display after a single frame
+    lost at connect.
+    """
+    import time as time_mod
+
+    agg = SampleAggregator()
+    agg.feed(_block(0, 10))
+    noticed = time_mod.monotonic()
+    agg.feed(_block(20, 10))                 # rows 10..19 lost
+    for first in range(30, 230, 10):         # the stream carries on
+        assert agg.feed(_block(first, 10)) == []
+
+    assert agg.missing_rows == 10, "only the hole is missing, not the rows held behind it"
+    due = agg.due_gaps(now=noticed + 2.0)
+    assert [(g.first_seq, g.last_seq) for g in due] == [(10, 19)]
+
+    delivered = agg.feed(_block(10, 10), backfill=True)
+    assert sum(b.n_samples for b in delivered) == 220
+    assert agg.held_rows == 0 and agg.open_gaps == []
+
+
+def test_a_second_hole_behind_held_rows_is_its_own_gap():
+    agg = SampleAggregator()
+    agg.feed(_block(0, 10))
+    agg.feed(_block(20, 10))    # hole 10..19
+    agg.feed(_block(40, 10))    # hole 30..39
+    assert [(g.first_seq, g.last_seq) for g in agg.open_gaps] == [(10, 19), (30, 39)]
+    assert agg.missing_rows == 20
+
+
 def test_aggregator_gives_up_on_a_gap_after_repeated_failures():
     import time as time_mod
 

@@ -124,10 +124,15 @@ class SampleAggregator:
         self._resolve_gap(block.first_seq, block.last_seq)
 
         if block.first_seq > self.next_seq:
-            # A hole. Hold this block and remember what is missing.
-            self._note_gap(self.next_seq, block.first_seq - 1)
+            # A hole. Hold this block and remember what is missing -- which is only
+            # what lies between the newest row seen so far and this block. Rows
+            # already held are not missing, and re-noting the whole span from
+            # next_seq on every block both inflated the count and restarted the
+            # gap's grace period each time, so it was never requested at all.
+            self._note_gap(max(self.next_seq, self._last_seq_seen + 1), block.first_seq - 1)
             self.stats.reorder_events += 1
             self._hold(block)
+            self._last_seq_seen = max(self._last_seq_seen, block.last_seq)
             return []
 
         return self._drain(block)
@@ -198,10 +203,15 @@ class SampleAggregator:
     def _note_gap(self, first: int, last: int) -> None:
         if last < first:
             return
-        # Merge into an adjacent known gap rather than fragmenting.
+        # Merge into a known gap rather than fragmenting, and never replace one:
+        # a replacement starts its grace period and backoff over.
         for gap in self._gaps.values():
             if gap.first_seq <= first and last <= gap.last_seq:
                 return
+        existing = self._gaps.get(first)
+        if existing is not None:
+            existing.last_seq = max(existing.last_seq, last)
+            return
         self._gaps[first] = Gap(first_seq=first, last_seq=last)
 
     def _resolve_gap(self, first: int, last: int) -> None:

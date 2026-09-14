@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tjiptemp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Desktop control, logging and calibration software for the TjipTemp ESP32-S3 thermometer board"
 readme = "README.md"
 requires-python = ">=3.10"

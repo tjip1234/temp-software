@@ -33,6 +33,9 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.2.1" date="2026-09-14">
+      <description><p>Fixes from testing against a real DIN-6 board: the live view no longer freezes after a lost frame, recordings name channels the way the board does, the simulator panel shows how far its table reaches, clock drift is fitted from minutes of data, and an AppImage that runs on any Linux.</p></description>
+    </release>
     <release version="0.2.0" date="2026-09-13">
       <description><p>A tracker-style colour scheme: tan frames, and black display boxes with yellow values and green labels, on a white or black ground.</p></description>
     </release>
